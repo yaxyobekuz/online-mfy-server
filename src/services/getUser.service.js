@@ -1,9 +1,18 @@
 import api from "../config/axios.js";
 
-try {
-  const res = await api.get("/auth/user_info");
+/**
+ * Access token yordamida tashqi API'dan foydalanuvchi ma'lumotini oladi.
+ * @param {string} accessToken
+ * @returns {Promise<object>} foydalanuvchi ma'lumotlari
+ */
+export const getUserByToken = async (accessToken) => {
+  const res = await api.get("/auth/user_info", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
 
-  console.log("User info:", res);
-} catch (err) {
-  console.error("Error fetching user info:", err);
-}
+  return res;
+};
+
+export default getUserByToken;
