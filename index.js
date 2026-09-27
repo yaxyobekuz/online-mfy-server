@@ -9,13 +9,13 @@ import { authContext } from "./src/middlewares/auth-context.middleware.js";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+await connectDB();
+
 app.use(cors());
 app.use(express.json());
 app.use(authContext);
 
 app.use("/api", userRoutes);
-
-// await connectDB();
 
 app.listen(PORT, () => {
   console.log(`Server ${PORT}-portda ishga tushdi`);
