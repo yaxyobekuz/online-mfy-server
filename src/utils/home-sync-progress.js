@@ -15,6 +15,10 @@ export const startSync = (key, total) => {
     done: 0,
     failed: 0,
     errors: [],
+    // Rate-limit (429) tufayli kutayotgan bo'lsa, shu vaqtgacha (ms,
+    // Date.now() bilan solishtiriladigan) kutish davom etadi. Bo'sh
+    // bo'lsa hozircha kutish yo'q — jarayon oddiy davom etmoqda.
+    waitingUntil: null,
     startedAt: Date.now(),
     finishedAt: null,
   });
@@ -25,10 +29,20 @@ export const tickSync = (key, { failed = false, error = null } = {}) => {
   if (!progress) return;
 
   progress.done += 1;
+  progress.waitingUntil = null;
   if (failed) {
     progress.failed += 1;
     if (error) progress.errors.push(error);
   }
+};
+
+// Rate-limitga uchrab kutish boshlanganda/tugaganda progressni
+// yangilaydi — client "N soniya kutilmoqda" deb ko'rsatishi uchun.
+export const setSyncWaiting = (key, untilTimestampMs) => {
+  const progress = progressByKey.get(key);
+  if (!progress) return;
+
+  progress.waitingUntil = untilTimestampMs;
 };
 
 export const finishSync = (key) => {

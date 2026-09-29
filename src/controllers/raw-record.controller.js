@@ -1,6 +1,17 @@
 import * as XLSX from "xlsx";
+import api from "../config/api.js";
 import RawRecord from "../models/RawRecord.js";
 import { getRequestUser } from "../utils/request-context.js";
+import { withRateLimit } from "../utils/rate-limit.js";
+import {
+  startSync,
+  tickSync,
+  finishSync,
+  failSync,
+  getSyncProgress,
+  isSyncRunning,
+  setSyncWaiting,
+} from "../utils/home-sync-progress.js";
 
 const PAGE_SIZE = 100;
 
@@ -175,6 +186,190 @@ export const fixRawRecordPhones = async (req, res) => {
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
   }
+};
+
+// Joriy foydalanuvchining xom yozuvlari bo'yicha jami/yangilangan/
+// yangilanmagan sonini qaytaradi (GCP sync KPI cardlar uchun).
+export const getRawRecordsStats = async (req, res) => {
+  const user = getRequestUser();
+  if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
+
+  try {
+    const filter = { userUid: user.uid };
+    const total = await RawRecord.countDocuments(filter);
+    const synced = await RawRecord.countDocuments({
+      ...filter,
+      gcpSyncedAt: { $ne: null },
+    });
+
+    return res.status(200).json({ total, synced, notSynced: total - synced });
+  } catch {
+    return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+const gcpSyncKey = (userUid) => `gcp:${userUid}`;
+
+// RawRecord.birthDate Excel'dan "DD.MM.YYYY" formatida keladi, GCP
+// API esa "YYYY-MM-DD" formatini talab qiladi.
+const toIsoDate = (birthDate) => {
+  const match = String(birthDate ?? "").match(
+    /^(\d{2})\.(\d{2})\.(\d{4})$/,
+  );
+  if (!match) return null;
+
+  const [, day, month, year] = match;
+  return `${year}-${month}-${day}`;
+};
+
+// GCP'dan keladigan "YYYY-MM-DD" formatini, mavjud RawRecord
+// yozuvlarida ishlatiladigan "DD.MM.YYYY" formatiga o'tkazadi.
+const toDottedDate = (isoDate) => {
+  const match = String(isoDate ?? "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return isoDate ?? null;
+
+  const [, year, month, day] = match;
+  return `${day}.${month}.${year}`;
+};
+
+// Berilgan pinfl + tug'ilgan sana bo'yicha davlat pasport bazasidan
+// (GCP) foydalanuvchining eng so'nggi ma'lumotini olib qaytaradi.
+// `progressKey` berilsa, rate-limitga uchrab kutayotgan payt progress'da
+// ko'rsatiladi (client "N soniya kutilmoqda" deb ko'rsatishi uchun).
+const fetchGcpData = (pinfl, birthDate, progressKey) =>
+  withRateLimit(
+    () =>
+      api.get("/api/v1/gcp/pinfl", {
+        params: {
+          pinfl,
+          birth_date: birthDate,
+          form_name: "survey_homes_family",
+        },
+      }),
+    {
+      delayMs: 150,
+      adaptiveKey: progressKey,
+      onWait: progressKey
+        ? (until) => setSyncWaiting(progressKey, until)
+        : undefined,
+    },
+  ).then((response) => response.data);
+
+// GCP javobidan RawRecord'ning F.I.Sh./hujjat/sana maydonlarini
+// yangilash uchun kerakli qismini chiqarib oladi. GCP biror maydon
+// uchun bo'sh/mavjud bo'lmagan qiymat qaytarsa, o'sha maydon $set'ga
+// umuman kiritilmaydi — shunda mavjud (Excel'dan kelgan) qiymat DB'da
+// o'zgarishsiz saqlanib qoladi, bo'sh qiymat bilan ustidan yozilmaydi.
+const mapGcpUpdate = (gcpData) => {
+  const document = gcpData.documents?.[0];
+
+  const candidates = {
+    fullName: gcpData.full_name,
+    birthDate: toDottedDate(gcpData.birth_date),
+    documentType: document?.type,
+    documentNumber: gcpData.current_document,
+  };
+
+  const update = { gcpData, gcpSyncedAt: new Date() };
+
+  for (const [field, value] of Object.entries(candidates)) {
+    if (value !== null && value !== undefined && value !== "") {
+      update[field] = value;
+    }
+  }
+
+  return update;
+};
+
+// Joriy foydalanuvchining BARCHA xom yozuvlarini GCP orqali
+// yangilashni background'da (rate-limit himoyasi bilan, ketma-ket)
+// boshlaydi. Bitta yozuv xato bersa (masalan pinfl/sana noto'g'ri),
+// qolganlarini yuklashda davom etadi — butun jarayon to'xtamaydi.
+const syncRawRecordsWithGcp = async (user, records) => {
+  const key = gcpSyncKey(user.uid);
+  startSync(key, records.length);
+
+  try {
+    for (const record of records) {
+      try {
+        const isoBirthDate = toIsoDate(record.birthDate);
+
+        if (!record.pinfl || !isoBirthDate) {
+          throw new Error("JSHSHIR yoki tug'ilgan sana noto'g'ri/yo'q");
+        }
+
+        const gcpData = await fetchGcpData(record.pinfl, isoBirthDate, key);
+
+        if (!gcpData || Object.keys(gcpData).length === 0) {
+          throw new Error("GCP'da ma'lumot topilmadi");
+        }
+
+        await RawRecord.updateOne(
+          { _id: record._id },
+          { $set: mapGcpUpdate(gcpData) },
+        );
+
+        tickSync(key);
+      } catch (err) {
+        const reason =
+          err.response?.data?.message || err.message || "Noma'lum xatolik";
+
+        tickSync(key, {
+          failed: true,
+          error: {
+            recordId: String(record._id),
+            fullName: record.fullName,
+            pinfl: record.pinfl,
+            reason,
+          },
+        });
+      }
+    }
+
+    finishSync(key);
+  } catch (err) {
+    failSync(key, err.message);
+  }
+};
+
+// Foydalanuvchining barcha xom yozuvlarini GCP orqali yangilashni
+// background'da boshlaydi (javobni darhol qaytaradi).
+export const syncRawRecordsGcp = async (req, res) => {
+  const user = getRequestUser();
+  if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
+
+  const key = gcpSyncKey(user.uid);
+  if (isSyncRunning(key)) {
+    return res.status(409).json({ message: "Yuklash allaqachon ketmoqda" });
+  }
+
+  const onlyMissing = req.query.onlyMissing === "true";
+  const filter = { userUid: user.uid };
+  if (onlyMissing) filter.gcpSyncedAt = null;
+
+  const records = await RawRecord.find(filter);
+
+  if (!records.length) {
+    return res.status(200).json({ message: "Yangilanadigan yozuv yo'q" });
+  }
+
+  // Background'da ishga tushiramiz, javobni kutmasdan darhol qaytaramiz.
+  syncRawRecordsWithGcp(user, records);
+
+  return res.status(202).json({ total: records.length });
+};
+
+// GCP orqali ommaviy yangilashning joriy progressini qaytaradi.
+export const getRawRecordsGcpSyncStatus = async (req, res) => {
+  const user = getRequestUser();
+  if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
+
+  const progress = getSyncProgress(gcpSyncKey(user.uid));
+  if (!progress) {
+    return res.status(200).json({ status: "idle" });
+  }
+
+  return res.status(200).json(progress);
 };
 
 // Joriy foydalanuvchining barcha xom ma'lumotlarini o'chiradi.

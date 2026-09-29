@@ -57,16 +57,20 @@ const mapHomeDetails = (formData) => ({
 });
 
 // Bitta xonadonning batafsil ma'lumotini tashqi API'dan olib qaytaradi
-// (DB'ga yozmasdan, xom formData'ni).
-const fetchHomeDetails = (user, homeId) =>
-  withRateLimit(() =>
-    api.get(`/web/v1/forms/survey_homes/${homeId}`, {
-      params: {
-        obl_id: user.oblId,
-        area_id: user.areaId,
-        district_id: user.districtId,
-      },
-    }),
+// (DB'ga yozmasdan, xom formData'ni). `progressKey` berilsa, throttle
+// shu kalit bo'yicha moslashuvchan bo'ladi (bir nechta muvaffaqiyatli
+// so'rovdan keyin tezlashadi, 429'da sekinlashadi).
+const fetchHomeDetails = (user, homeId, progressKey) =>
+  withRateLimit(
+    () =>
+      api.get(`/web/v1/forms/survey_homes/${homeId}`, {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+        },
+      }),
+    { delayMs: 150, adaptiveKey: progressKey },
   ).then((response) => response.formData);
 
 const HOMES_PAGE_SIZE = 100;
@@ -371,7 +375,7 @@ const syncHomesDetails = async (user, homes) => {
   try {
     for (const home of homes) {
       try {
-        const formData = await fetchHomeDetails(user, home.homeId);
+        const formData = await fetchHomeDetails(user, home.homeId, key);
         Object.assign(home, mapHomeDetails(formData));
         await home.save();
         tickSync(key);

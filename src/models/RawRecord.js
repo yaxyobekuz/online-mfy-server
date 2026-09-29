@@ -31,6 +31,15 @@ const rawRecordSchema = new Schema(
     // ustunlar chiqsa ham ma'lumot yo'qolmasligi uchun.
     raw: { type: Schema.Types.Mixed },
 
+    // Davlat pasport bazasidan (GCP, pinfl+birth_date orqali) kelgan
+    // so'nggi ma'lumotning to'liq javobi — kelajakda kerak bo'lsa
+    // (masalan address, tin) ishlatish uchun saqlanadi.
+    gcpData: { type: Schema.Types.Mixed },
+
+    // GCP orqali so'nggi marta qachon yangilangani (lazy/ommaviy sync
+    // holatini bilish uchun).
+    gcpSyncedAt: { type: Date },
+
     // Qaysi foydalanuvchi yuklagan
     userUid: { type: String, required: true, index: true },
   },
