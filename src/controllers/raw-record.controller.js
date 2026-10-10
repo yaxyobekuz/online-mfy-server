@@ -250,7 +250,18 @@ const fetchGcpData = (pinfl, birthDate, progressKey) =>
       delayMs: 150,
       adaptiveKey: progressKey,
       onWait: progressKey
-        ? (until) => setSyncWaiting(progressKey, until)
+        ? (until) => {
+            setSyncWaiting(progressKey, until);
+            if (!until) return;
+
+            // Qisqa (1-2 soniyalik) qayta urinishlarni logga chiqarmaymiz —
+            // ular oyna yangilanishini kutayotgan oddiy holat, va ketma-ket
+            // kelganda terminalni bir xil qator bilan to'ldirib yuboradi.
+            const seconds = Math.ceil((until - Date.now()) / 1000);
+            if (seconds >= 3) {
+              console.log(`[GCP sync] rate limitga yetildi, ${seconds} soniya kutilmoqda...`);
+            }
+          }
         : undefined,
     },
   ).then((response) => response.data);
@@ -287,10 +298,16 @@ const mapGcpUpdate = (gcpData) => {
 // qolganlarini yuklashda davom etadi — butun jarayon to'xtamaydi.
 const syncRawRecordsWithGcp = async (user, records) => {
   const key = gcpSyncKey(user.uid);
-  startSync(key, records.length);
+  const total = records.length;
+  startSync(key, total);
+
+  console.log(`[GCP sync] boshlandi: jami ${total} ta yozuv`);
 
   try {
-    for (const record of records) {
+    for (const [index, record] of records.entries()) {
+      const position = index + 1;
+      const startedAt = Date.now();
+
       try {
         const isoBirthDate = toIsoDate(record.birthDate);
 
@@ -310,9 +327,12 @@ const syncRawRecordsWithGcp = async (user, records) => {
         );
 
         tickSync(key);
+        console.log(`[GCP sync] ${position}/${total} — OK (${record.fullName ?? record.pinfl}) ${Date.now() - startedAt}ms`);
       } catch (err) {
         const reason =
           err.response?.data?.message || err.message || "Noma'lum xatolik";
+
+        console.log(`[GCP sync] ${position}/${total} — XATO (${record.fullName ?? record.pinfl}): ${reason} ${Date.now() - startedAt}ms`);
 
         tickSync(key, {
           failed: true,
@@ -326,6 +346,7 @@ const syncRawRecordsWithGcp = async (user, records) => {
       }
     }
 
+    console.log(`[GCP sync] tugadi: ${total} tadan ${total - (getSyncProgress(key)?.failed ?? 0)} tasi muvaffaqiyatli`);
     finishSync(key);
   } catch (err) {
     failSync(key, err.message);

@@ -16,17 +16,19 @@ const familySyncKey = (userUid) => `family:${userUid}`;
 
 // Bitta xonadonning survey_uuid'i bo'yicha tashqi API'dan oila
 // a'zolari ro'yxatini olib qaytaradi (DB'ga yozmasdan).
-const fetchFamilyMembers = (user, streetId, surveyUuid) =>
-  withRateLimit(() =>
-    api.get("/web/v1/tables/survey_homes_family/data", {
-      params: {
-        obl_id: user.oblId,
-        area_id: user.areaId,
-        district_id: user.districtId,
-        street_id: streetId,
-        survey_uuid: surveyUuid,
-      },
-    }),
+const fetchFamilyMembers = (user, streetId, surveyUuid, progressKey) =>
+  withRateLimit(
+    () =>
+      api.get("/web/v1/tables/survey_homes_family/data", {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+          street_id: streetId,
+          survey_uuid: surveyUuid,
+        },
+      }),
+    { adaptiveKey: progressKey },
   ).then((response) => response.data.results);
 
 const mapFamilyMember = (member, homeId, userUid) => ({
@@ -43,17 +45,19 @@ const mapFamilyMember = (member, homeId, userUid) => ({
 // Berilgan xonadon uchun survey_uuid'ni ta'minlaydi: agar hali
 // yuklanmagan bo'lsa, xonadon tafsilotini (formData) yuklab, undan
 // survey_uuid'ni oladi va DB'ga saqlaydi.
-const ensureSurveyUuid = async (user, home) => {
+const ensureSurveyUuid = async (user, home, progressKey) => {
   if (home.surveyUuid) return home.surveyUuid;
 
-  const response = await withRateLimit(() =>
-    api.get(`/web/v1/forms/survey_homes/${home.homeId}`, {
-      params: {
-        obl_id: user.oblId,
-        area_id: user.areaId,
-        district_id: user.districtId,
-      },
-    }),
+  const response = await withRateLimit(
+    () =>
+      api.get(`/web/v1/forms/survey_homes/${home.homeId}`, {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+        },
+      }),
+    { adaptiveKey: progressKey },
   );
 
   const surveyUuid = response.formData?.survey_uuid;
@@ -67,15 +71,20 @@ const ensureSurveyUuid = async (user, home) => {
 
 // Berilgan xonadon uchun oila a'zolarini tashqi API'dan olib, DB'ga
 // sinxronlaydi (eskilarini o'chirib, yangilarini kiritadi).
-const syncHomeFamily = async (user, home) => {
-  const surveyUuid = await ensureSurveyUuid(user, home);
+const syncHomeFamily = async (user, home, progressKey) => {
+  const surveyUuid = await ensureSurveyUuid(user, home, progressKey);
   if (!surveyUuid) {
     throw new Error(
       "Xonadonning survey_uuid'i topilmadi (tafsilot yuklanmagan bo'lishi mumkin)",
     );
   }
 
-  const results = await fetchFamilyMembers(user, home.streetId, surveyUuid);
+  const results = await fetchFamilyMembers(
+    user,
+    home.streetId,
+    surveyUuid,
+    progressKey,
+  );
 
   await FamilyMember.deleteMany({ userUid: user.uid, homeId: home.homeId });
 
@@ -161,6 +170,95 @@ export const syncFamilyForHome = async (req, res) => {
     return res.status(500).json({ message: "Server xatoligi" });
   }
 };
+
+// Berilgan xonadonlar ro'yxatining oila a'zolarini ketma-ket (rate-limit
+// himoyasi bilan) yuklab, DB'ga saqlaydi. Bitta xonadon xato bersa ham
+// qolganlarini yuklashda davom etadi — butun jarayon to'xtamasin.
+const syncHomesFamily = async (user, homes) => {
+  const key = familySyncKey(user.uid);
+  const total = homes.length;
+  startSync(key, total);
+
+  console.log(`[Oila sync] boshlandi: jami ${total} ta xonadon`);
+
+  try {
+    for (const [index, home] of homes.entries()) {
+      const position = index + 1;
+      const startedAt = Date.now();
+
+      try {
+        const members = await syncHomeFamily(user, home, key);
+        home.familySyncedAt = new Date();
+        await home.save();
+
+        tickSync(key);
+        console.log(
+          `[Oila sync] ${position}/${total} — OK (${home.homeNum ?? home.homeId}) ${members.length} a'zo ${Date.now() - startedAt}ms`,
+        );
+      } catch (err) {
+        const reason =
+          err.response?.data?.message || err.message || "Noma'lum xatolik";
+
+        console.log(
+          `[Oila sync] ${position}/${total} — XATO (${home.homeNum ?? home.homeId}): ${reason} ${Date.now() - startedAt}ms`,
+        );
+
+        tickSync(key, {
+          failed: true,
+          error: {
+            homeId: home.homeId,
+            homeNum: home.homeNum,
+            cadasterNumber: home.cadasterNumber,
+            fullName: home.fullName,
+            reason,
+          },
+        });
+      }
+    }
+
+    console.log(
+      `[Oila sync] tugadi: ${total} tadan ${total - (getSyncProgress(key)?.failed ?? 0)} tasi muvaffaqiyatli`,
+    );
+    finishSync(key);
+  } catch (err) {
+    failSync(key, err.message);
+  }
+};
+
+// req.query.onlyMissing === "true" bo'lsa, faqat oila a'zolari hali
+// yuklanmagan (familySyncedAt bo'sh) xonadonlarni filtrlaydi.
+const filterHomesToSync = (homes, onlyMissing) =>
+  onlyMissing ? homes.filter((home) => !home.familySyncedAt) : homes;
+
+// Ommaviy yuklashni background'da boshlaydi (javobni darhol qaytaradi).
+const startFamilySync = async (req, res, filter) => {
+  const user = getRequestUser();
+  if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
+
+  const key = familySyncKey(user.uid);
+  if (isSyncRunning(key)) {
+    return res.status(409).json({ message: "Yuklash allaqachon ketmoqda" });
+  }
+
+  const onlyMissing = req.query.onlyMissing === "true";
+  const allHomes = await Home.find({ userUid: user.uid, ...filter });
+  const homes = filterHomesToSync(allHomes, onlyMissing);
+
+  if (!homes.length) {
+    return res.status(200).json({ message: "Yuklanadigan xonadon yo'q" });
+  }
+
+  syncHomesFamily(user, homes);
+
+  return res.status(202).json({ total: homes.length });
+};
+
+// Berilgan ko'chadagi barcha xonadonlarning oila a'zolarini yuklaydi.
+export const syncStreetHomesFamily = (req, res) =>
+  startFamilySync(req, res, { streetId: req.params.streetId });
+
+// Foydalanuvchining BARCHA xonadonlarining oila a'zolarini yuklaydi.
+export const syncAllHomesFamily = (req, res) => startFamilySync(req, res, {});
 
 // Oila a'zolarini ommaviy yuklashning joriy progressini qaytaradi.
 export const getFamilySyncStatus = async (req, res) => {

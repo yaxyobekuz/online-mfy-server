@@ -9,7 +9,7 @@ export const fetchAndSyncUser = async () => {
   const data = await api.get("/auth/user_info");
 
   const user = await User.findOneAndUpdate({ uid: data.uid }, data, {
-    new: true,
+    returnDocument: "after",
     upsert: true,
   });
 

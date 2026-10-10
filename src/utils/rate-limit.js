@@ -6,26 +6,38 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //     qidiradi (ba'zi tashqi API'lar buni faqat matnda qaytaradi,
 //     header'da emas — screenshot'da ko'rilgan holat);
 //  3. ikkalasi ham topilmasa, ishonchli standart qiymatga tushadi.
+// Server "Retry after 0 seconds" deb qaytarishi mumkin (oyna yangilanish
+// arafasida). Kutmasdan darhol qayta urinsak, ketma-ket 429'lar yog'ilib,
+// API'ni bekorga uramiz — shuning uchun eng kam kutish chegarasi.
+const MIN_RETRY_WAIT_MS = 1000;
+
 const extractRetryAfterMs = (err, fallbackMs) => {
   const header = err.response?.headers?.["retry-after"];
-  if (header) return Number(header) * 1000;
+  if (header) return Math.max(MIN_RETRY_WAIT_MS, Number(header) * 1000);
 
   const message =
     err.response?.data?.message ?? err.message ?? "";
   const match = String(message).match(/retry after (\d+(?:\.\d+)?)\s*second/i);
-  if (match) return Number(match[1]) * 1000;
+  if (match) return Math.max(MIN_RETRY_WAIT_MS, Number(match[1]) * 1000);
 
   return fallbackMs;
 };
 
 const MIN_DELAY_MS = 120;
-const MAX_DELAY_MS = 3000;
-const BACKOFF_MULTIPLIER = 2;
+// Tashqi GCP API amalda ~5 so'rov / ~56 soniya limitini qo'llaydi va
+// limitga yetganda 56 soniyagacha bloklaydi. Shuning uchun throttle
+// shuncha kattalasha olishi kerak — so'rovlarni teng taqsimlab
+// yuborish (masalan har ~12 soniyada bitta) 429'ga umuman uchramaslik
+// imkonini beradi: o'tkazuvchanlik bir xil qoladi, lekin uzun
+// bloklanishlar va xatolar yo'qoladi.
+const MAX_DELAY_MS = 30000;
 // Har nechta ketma-ket muvaffaqiyatli so'rovdan keyin throttle'ni
 // bir bosqich pasaytiramiz (tashqi API'ning haqiqiy limitini
 // bilmagani uchun, asta-sekin sinab ko'rish orqali topamiz).
-const SUCCESS_STREAK_TO_SPEED_UP = 5;
-const SPEED_UP_FACTOR = 0.85;
+// Kamaytirish sekin (kichik qadam) bo'lishi kerak — aks holda
+// tez-tez limitga qaytib tushib qolamiz.
+const SUCCESS_STREAK_TO_SPEED_UP = 10;
+const SPEED_UP_FACTOR = 0.9;
 
 // Har bir mustaqil oqim (masalan "gcp:<userUid>") o'z throttle
 // holatini saqlaydi — bittasining sekinlashishi boshqasiga ta'sir
@@ -34,7 +46,16 @@ const adaptiveStateByKey = new Map();
 
 const getAdaptiveState = (key, initialDelayMs) => {
   if (!adaptiveStateByKey.has(key)) {
-    adaptiveStateByKey.set(key, { delayMs: initialDelayMs, successStreak: 0 });
+    adaptiveStateByKey.set(key, {
+      delayMs: initialDelayMs,
+      successStreak: 0,
+      // Muvaffaqiyatli so'rovlarning vaqt shtamplari. 429 kelganda
+      // server aytgan kutish vaqti — oynaning qolgan qismi, shuning
+      // uchun sig'imni o'sha oyna ichiga tushgan so'rovlar soni bo'yicha
+      // hisoblaymiz (oxirgi 429'dan beri emas — aks holda 1 ta so'rovni
+      // butun oynaga bo'lib, throttle keskin oshib ketardi).
+      successTimestamps: [],
+    });
   }
   return adaptiveStateByKey.get(key);
 };
@@ -76,6 +97,7 @@ export const withRateLimit = async (
 
       if (state) {
         state.successStreak += 1;
+        state.successTimestamps.push(Date.now());
         if (state.successStreak >= SUCCESS_STREAK_TO_SPEED_UP) {
           state.successStreak = 0;
           state.delayMs = Math.max(
@@ -93,15 +115,38 @@ export const withRateLimit = async (
         throw err;
       }
 
+      const waitMs = extractRetryAfterMs(err, fallbackRetryMs);
+
       if (state) {
         state.successStreak = 0;
-        state.delayMs = Math.min(
-          MAX_DELAY_MS,
-          Math.round(state.delayMs * BACKOFF_MULTIPLIER),
+
+        // Server aytgan kutish vaqti — joriy oynaning qolgan qismi,
+        // ya'ni oyna uzunligi shundan katta emas. Shu oyna ichiga
+        // tushgan muvaffaqiyatli so'rovlarni sanab, API'ning sig'imini
+        // (N so'rov / oyna) topamiz va so'rovlarni oynaga teng
+        // taqsimlaymiz (oyna / N). Shunda 429'ga umuman uchramaymiz:
+        // o'tkazuvchanlik o'sha-o'sha, lekin uzun bloklanishlar
+        // yo'qoladi va progress silliq boradi.
+        const now = Date.now();
+        const windowStart = now - waitMs;
+        const inWindow = state.successTimestamps.filter(
+          (ts) => ts >= windowStart,
+        ).length;
+
+        if (inWindow > 0) {
+          state.delayMs = Math.min(
+            MAX_DELAY_MS,
+            Math.round(waitMs / inWindow),
+          );
+        }
+
+        // Oynadan chiqib ketgan eski yozuvlarni tashlab yuboramiz —
+        // ro'yxat cheksiz o'smasin.
+        state.successTimestamps = state.successTimestamps.filter(
+          (ts) => ts >= windowStart,
         );
       }
 
-      const waitMs = extractRetryAfterMs(err, fallbackRetryMs);
       onWait?.(Date.now() + waitMs);
       await sleep(waitMs);
       onWait?.(null);
