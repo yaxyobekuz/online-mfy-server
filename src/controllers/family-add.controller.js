@@ -119,6 +119,17 @@ const buildPayload = (record, home) => {
     return { skip: "Oila boshlig'i — platformada allaqachon mavjud" };
   }
 
+  // Xom ma'lumotdagi "oila boshlig'i" platformadagi xonadon egasi
+  // bilan har doim ham bir odam emas: ko'p holatda ro'yxat egasi
+  // ayoli yoki farzandi nomiga rasmiylashtirilgan. Shunday yozuvni
+  // a'zo sifatida qo'shib bo'lmaydi — u allaqachon egasi sifatida
+  // turibdi, platforma 400 bilan rad etadi.
+  if (record.pinfl && home.pinfl && String(record.pinfl) === String(home.pinfl)) {
+    return {
+      skip: "Platformada xonadon egasi sifatida ro'yxatda (a'zo qilib qo'shilmaydi)",
+    };
+  }
+
   const relationship = relationshipCode(record.relationship);
   if (!relationship) {
     return {
@@ -204,6 +215,46 @@ const postFamilyMember = (user, home, record, payload, progressKey) =>
     },
   );
 
+/**
+ * Tashqi platforma xatoni turli shakllarda qaytaradi: ba'zan
+ * { message }, ba'zan { errors: { maydon: [...] } }, ba'zan oddiy
+ * matn. Axios'ning o'z xabari ("Request failed with status code 400")
+ * esa sababni umuman ko'rsatmaydi. Shuning uchun javobni bosqichma-
+ * bosqich ochib, eng foydali matnni chiqaramiz.
+ */
+const describeError = (err) => {
+  const data = err.response?.data;
+
+  if (!data) return err.message || "Noma'lum xatolik";
+
+  if (typeof data === "string") {
+    return data.slice(0, 300);
+  }
+
+  // Laravel/Yii uslubidagi validatsiya xatolari:
+  // { errors: { full_name: ["majburiy"], pinfl: ["noto'g'ri"] } }
+  if (data.errors && typeof data.errors === "object") {
+    const parts = Object.entries(data.errors).map(([field, messages]) => {
+      const text = Array.isArray(messages) ? messages.join(", ") : messages;
+      return `${field}: ${text}`;
+    });
+
+    if (parts.length) return parts.join(" | ").slice(0, 400);
+  }
+
+  // Maydon -> xabar ko'rinishidagi tekis obyekt
+  const direct = data.message ?? data.error ?? data.detail ?? data.title;
+  if (typeof direct === "string" && direct) return direct.slice(0, 300);
+
+  // Hech biri mos kelmasa — butun javobni ko'rsatamiz, chunki
+  // "status code 400" dan ko'ra foydaliroq.
+  try {
+    return JSON.stringify(data).slice(0, 400);
+  } catch {
+    return err.message || "Noma'lum xatolik";
+  }
+};
+
 // Jarayonning har bir qadami client terminaliga uzatiladi. Oxirgi
 // N ta hodisa xotirada saqlanadi — client polling orqali o'qiydi.
 const LOG_LIMIT = 500;
@@ -230,6 +281,9 @@ const addFamilyMembers = async (user, records, homesByCadaster) => {
   const total = records.length;
   startSync(key, total);
   logsByKey.set(key, []);
+
+  // Birinchi xatoda to'liq javobni bir marta chiqarish uchun.
+  let firstErrorLogged = false;
 
   pushLog(key, { level: "info", message: `Boshlandi: ${total} ta yozuv` });
   console.log(`[Oila qo'shish] boshlandi: ${total} ta yozuv`);
@@ -353,11 +407,33 @@ const addFamilyMembers = async (user, records, homesByCadaster) => {
         tickSync(key);
       } catch (err) {
         const ms = Date.now() - startedAt;
-        const reason =
-          err.response?.data?.message ||
-          err.response?.data?.error ||
-          err.message ||
-          "Noma'lum xatolik";
+        const reason = describeError(err);
+
+        // Birinchi xatoda javobning to'liq tarkibini jurnalga
+        // chiqaramiz — qisqartirilgan xabar sababni ko'rsatmasa,
+        // shu yerdan aniqlanadi.
+        if (!firstErrorLogged) {
+          firstErrorLogged = true;
+
+          const raw = (() => {
+            try {
+              return JSON.stringify(err.response?.data);
+            } catch {
+              return String(err.response?.data);
+            }
+          })();
+
+          pushLog(key, {
+            level: "error",
+            message: `To'liq javob [HTTP ${err.response?.status}]: ${String(raw).slice(0, 900)}`,
+          });
+          console.log("--- Platforma javobi (diagnostika) ---");
+          console.log("status :", err.response?.status);
+          console.log("data   :", raw);
+          console.log("payload:", JSON.stringify(payload));
+          console.log("params :", JSON.stringify(err.config?.params));
+          console.log("--------------------------------------");
+        }
 
         await RawRecord.updateOne(
           { _id: record._id },
