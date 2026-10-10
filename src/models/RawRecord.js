@@ -62,6 +62,13 @@ const rawRecordSchema = new Schema(
     // holatini bilish uchun).
     gcpSyncedAt: { type: Date },
 
+    // GCP shaxsni topdi, lekin uning amaldagi hujjati yaroqsiz
+    // (muddati o'tgan, hali ID kartaga almashtirilmagan). Bunday
+    // yozuvga qayta so'rov yuborilmaydi — odam hujjatini yangilamaguncha
+    // javob o'zgarmaydi. Qayta urinish uchun bu maydonni tozalash kerak.
+    documentExpired: { type: Boolean },
+    documentExpiredAt: { type: Date },
+
     // Qaysi foydalanuvchi yuklagan
     userUid: { type: String, required: true, index: true },
   },

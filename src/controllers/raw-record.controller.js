@@ -205,7 +205,20 @@ export const getRawRecordsStats = async (req, res) => {
       $or: [{ gcpSyncedAt: { $ne: null } }, { birthCertSyncedAt: { $ne: null } }],
     });
 
-    return res.status(200).json({ total, synced, notSynced: total - synced });
+    // Hujjati eskirgan yozuvlar qayta so'ralmaydi, shuning uchun ular
+    // "yangilanmagan" sonidan chiqariladi — aks holda bu son hech
+    // qachon nolga tushmaydi va chalg'itadi.
+    const expired = await RawRecord.countDocuments({
+      ...filter,
+      documentExpired: true,
+    });
+
+    return res.status(200).json({
+      total,
+      synced,
+      expired,
+      notSynced: total - synced - expired,
+    });
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
   }
@@ -412,6 +425,17 @@ const mapBirthCertUpdate = (response) => {
 const needsBirthCert = (record) =>
   !record.pinfl && record.documentSeries && record.documentNumber;
 
+// GCP shaxsni topdi, lekin uning amaldagi hujjati yaroqsiz. Javob
+// shunday keladi:
+//   "Ma'lumot topilmadi (status = 1, status_name = aktiv,
+//    doc_status = Yaroqsiz hujjat)"
+// yoki "... doc_status = Yaroqli hujjat yo'q". Ikkalasi ham bir xil
+// ma'noda: odam hujjatini yangilamaguncha javob o'zgarmaydi.
+const isExpiredDocument = (gcpData) => {
+  const message = String(gcpData?.message ?? "");
+  return /doc_status\s*=\s*(Yaroqsiz hujjat|Yaroqli hujjat yo)/i.test(message);
+};
+
 // Joriy foydalanuvchining BARCHA xom yozuvlarini GCP orqali
 // yangilashni background'da (rate-limit himoyasi bilan, ketma-ket)
 // boshlaydi. Bitta yozuv xato bersa (masalan pinfl/sana noto'g'ri),
@@ -492,6 +516,30 @@ const syncRawRecordsWithGcp = async (user, records) => {
             );
             continue;
           }
+
+          // Shaxs bazada bor, lekin amaldagi hujjati yaroqsiz
+          // (muddati o'tgan, ID kartaga almashtirilmagan). Javob
+          // odam hujjatini yangilamaguncha o'zgarmaydi — shuning
+          // uchun belgilab qo'yamiz va boshqa so'ramaymiz.
+          if (isExpiredDocument(gcpData)) {
+            await RawRecord.updateOne(
+              { _id: record._id },
+              {
+                $set: {
+                  documentExpired: true,
+                  documentExpiredAt: new Date(),
+                  gcpData,
+                },
+              },
+            );
+
+            tickSync(key);
+            console.log(
+              `[Sync] ${position}/${total} — HUJJATI ESKIRGAN (${record.fullName}) ${Date.now() - startedAt}ms`,
+            );
+            continue;
+          }
+
           throw new Error(gcpData?.message || "GCP'da ma'lumot topilmadi");
         }
 
@@ -509,6 +557,18 @@ const syncRawRecordsWithGcp = async (user, records) => {
           err.response?.data?.message || err.message || "Noma'lum xatolik";
 
         console.log(`[Sync] ${position}/${total} — XATO (${record.fullName ?? record.pinfl}): ${reason} ${Date.now() - startedAt}ms`);
+
+        // Diagnostika: tashqi API 500 qaytarsa, javobning to'liq
+        // tarkibini bir marta chiqaramiz — sababni aniqlash uchun.
+        if (err.response?.status >= 500 && !globalThis.__loggedServerError) {
+          globalThis.__loggedServerError = true;
+          console.log("--- 500 javobi (diagnostika) ---");
+          console.log("URL   :", err.config?.url);
+          console.log("params:", JSON.stringify(err.config?.params));
+          console.log("status:", err.response.status);
+          console.log("data  :", JSON.stringify(err.response.data)?.slice(0, 600));
+          console.log("--------------------------------");
+        }
 
         tickSync(key, {
           failed: true,
@@ -541,7 +601,13 @@ export const syncRawRecordsGcp = async (req, res) => {
   }
 
   const onlyMissing = req.query.onlyMissing === "true";
-  const filter = { userUid: user.uid };
+
+  // Hujjati eskirgan deb belgilanganlarga so'rov yubormaymiz — odam
+  // hujjatini yangilamaguncha javob o'zgarmaydi, bekorga vaqt va
+  // rate-limit ketadi. Qayta urinish kerak bo'lsa, documentExpired
+  // maydonini tozalash yetarli.
+  const filter = { userUid: user.uid, documentExpired: { $ne: true } };
+
   // Hech bir manbadan (GCP yoki guvohnoma) yangilanmaganlar.
   if (onlyMissing) {
     filter.gcpSyncedAt = null;
