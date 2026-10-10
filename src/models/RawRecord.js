@@ -69,6 +69,19 @@ const rawRecordSchema = new Schema(
     documentExpired: { type: Boolean },
     documentExpiredAt: { type: Date },
 
+    // --- Online Mahalla platformasiga oila a'zosi sifatida kiritish ---
+    // Har bir urinish natijasi saqlanadi: muvaffaqiyatli ham, xato ham
+    // qayta yuborilmaydi (platformada dublikat paydo bo'lmasligi uchun).
+    // "pending" — hali urinilmagan (maydon umuman yo'q).
+    familyAddStatus: { type: String, enum: ["success", "failed", "skipped"] },
+    // Platforma qaytargan yozuv ID'si (muvaffaqiyatli bo'lsa)
+    familyAddMemberId: { type: String },
+    // Xato sababi yoki o'tkazib yuborish sababi
+    familyAddError: { type: String },
+    familyAddAt: { type: Date },
+    // Qaysi xonadonga (platforma homeId) kiritilgani
+    familyAddHomeId: { type: String },
+
     // Qaysi foydalanuvchi yuklagan
     userUid: { type: String, required: true, index: true },
   },
