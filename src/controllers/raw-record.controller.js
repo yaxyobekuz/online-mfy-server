@@ -197,9 +197,12 @@ export const getRawRecordsStats = async (req, res) => {
   try {
     const filter = { userUid: user.uid };
     const total = await RawRecord.countDocuments(filter);
+    // Yozuv ikki manbadan yangilanishi mumkin: JSHSHIR'i borlar GCP
+    // orqali, guvohnomalilar FHDYO orqali. Ikkalasidan birortasi
+    // bo'lsa — yangilangan hisoblanadi.
     const synced = await RawRecord.countDocuments({
       ...filter,
-      gcpSyncedAt: { $ne: null },
+      $or: [{ gcpSyncedAt: { $ne: null } }, { birthCertSyncedAt: { $ne: null } }],
     });
 
     return res.status(200).json({ total, synced, notSynced: total - synced });
@@ -266,19 +269,47 @@ const fetchGcpData = (pinfl, birthDate, progressKey) =>
     },
   ).then((response) => response.data);
 
+// GCP hujjat turini uzun rasmiy nom bilan qaytaradi
+// ("O'zbekiston Respublikasi fuqarosining ID-kartasi"). Jadvalda
+// qisqa va o'qish oson bo'lishi uchun ikki nomga keltiramiz.
+const shortenDocumentType = (type) => {
+  if (!type) return null;
+  if (/ID[- ]?karta/i.test(type)) return "ID karta";
+  if (/pasport|passport/i.test(type)) return "Passport";
+  return type;
+};
+
+// GCP "current_document" ni seriya va raqam birga yopishgan holda
+// beradi ("AE8520186" = seriya "AE" + raqam "8520186"). Jadvalda
+// ular alohida ustunlarda ko'rinishi kerak, shuning uchun ajratamiz.
+// Kutilmagan shakl kelsa, ajratmasdan raqam sifatida qoldiramiz.
+const splitDocument = (document) => {
+  const match = String(document ?? "").match(/^([A-Z]{2})(\d{7})$/i);
+  if (!match) return { series: null, number: document ?? null };
+
+  return { series: match[1].toUpperCase(), number: match[2] };
+};
+
 // GCP javobidan RawRecord'ning F.I.Sh./hujjat/sana maydonlarini
 // yangilash uchun kerakli qismini chiqarib oladi. GCP biror maydon
 // uchun bo'sh/mavjud bo'lmagan qiymat qaytarsa, o'sha maydon $set'ga
 // umuman kiritilmaydi — shunda mavjud (Excel'dan kelgan) qiymat DB'da
 // o'zgarishsiz saqlanib qoladi, bo'sh qiymat bilan ustidan yozilmaydi.
+//
+// Javob { code, data: {...} } ko'rinishida keladi — haqiqiy maydonlar
+// "data" ichida. Yuqori qatlamdan o'qisak hammasi undefined bo'lib,
+// hech narsa yangilanmaydi.
 const mapGcpUpdate = (gcpData) => {
-  const document = gcpData.documents?.[0];
+  const person = gcpData.data ?? {};
+  const document = person.documents?.[0];
+  const { series, number } = splitDocument(person.current_document);
 
   const candidates = {
-    fullName: gcpData.full_name,
-    birthDate: toDottedDate(gcpData.birth_date),
-    documentType: document?.type,
-    documentNumber: gcpData.current_document,
+    fullName: person.full_name,
+    birthDate: toDottedDate(person.birth_date),
+    documentType: shortenDocumentType(document?.type),
+    documentSeries: series,
+    documentNumber: number,
   };
 
   const update = { gcpData, gcpSyncedAt: new Date() };
@@ -292,6 +323,95 @@ const mapGcpUpdate = (gcpData) => {
   return update;
 };
 
+// Tug'ilganlik guvohnomasi (seriya + raqam + sana) bo'yicha FHDYO
+// bazasidan bolaning ma'lumotini olib qaytaradi. Bolalarda JSHSHIR
+// bo'lmagani uchun GCP (pasport bazasi) ularni topa olmaydi —
+// shuning uchun alohida manba.
+const fetchBirthCertData = (series, number, birthDate, progressKey) =>
+  withRateLimit(
+    () =>
+      api.get("/api/v2/fhdyo/act/birth", {
+        params: { serial: series, number, birth_date: birthDate },
+      }),
+    {
+      delayMs: 150,
+      adaptiveKey: progressKey,
+      onWait: progressKey
+        ? (until) => {
+            setSyncWaiting(progressKey, until);
+            if (!until) return;
+
+            const seconds = Math.ceil((until - Date.now()) / 1000);
+            if (seconds >= 3) {
+              console.log(`[Sync] rate limitga yetildi, ${seconds} soniya kutilmoqda...`);
+            }
+          }
+        : undefined,
+    },
+  ).then((response) => response.data);
+
+// FHDYO javobi uch qavatli: { data: { info: { data: {...} } } } —
+// haqiqiy ma'lumot eng ichkarida.
+const extractBirthCertPerson = (response) => response?.data?.info?.data ?? null;
+
+// FHDYO javobidan to'liq ismni yig'adi (u uch bo'lakda keladi).
+const joinName = (surname, name, patronym) =>
+  [surname, name, patronym]
+    .map((part) => String(part ?? "").trim())
+    .filter(Boolean)
+    .join(" ")
+    .toUpperCase() || null;
+
+// FHDYO javobidan RawRecord maydonlarini tayyorlaydi. GCP mapping'i
+// kabi, faqat haqiqiy qiymat kelgan maydonlar $set'ga kiritiladi —
+// bo'sh javob mavjud (Excel'dan kelgan) ma'lumotni o'chirib yubormasin.
+const mapBirthCertUpdate = (response) => {
+  const person = extractBirthCertPerson(response);
+  if (!person) return null;
+
+  const candidates = {
+    fullName: joinName(person.surname, person.name, person.patronym),
+    birthDate: person.birth_date,
+    // Guvohnoma seriyasi/raqami ham yangilanishi mumkin (masalan
+    // dastlabki yozuvda xato bo'lsa).
+    documentSeries: person.cert_series,
+    documentNumber: person.cert_number,
+    // Bolaga JSHSHIR berilgan bo'lsa — saqlaymiz. Shundan keyin u
+    // GCP orqali ham tekshiriladi (pasport/ID karta olgan bo'lishi
+    // mumkin).
+    pinfl: person.pinfl != null ? String(person.pinfl) : null,
+    fatherFullName: joinName(
+      person.father_surname,
+      person.father_name,
+      person.father_patronym,
+    ),
+    fatherPinfl: person.father_pinfl != null ? String(person.father_pinfl) : null,
+    fatherBirthDate: person.father_birth_date,
+    motherFullName: joinName(
+      person.mother_surname,
+      person.mother_name,
+      person.mother_patronym,
+    ),
+    motherPinfl: person.mother_pinfl != null ? String(person.mother_pinfl) : null,
+    motherBirthDate: person.mother_birth_date,
+  };
+
+  const update = { birthCertData: response, birthCertSyncedAt: new Date() };
+
+  for (const [field, value] of Object.entries(candidates)) {
+    if (value !== null && value !== undefined && value !== "") {
+      update[field] = value;
+    }
+  }
+
+  return update;
+};
+
+// Yozuv guvohnoma bo'yicha yangilanadimi? JSHSHIR bo'lmasa va
+// guvohnoma seriyasi/raqami bo'lsa — ha.
+const needsBirthCert = (record) =>
+  !record.pinfl && record.documentSeries && record.documentNumber;
+
 // Joriy foydalanuvchining BARCHA xom yozuvlarini GCP orqali
 // yangilashni background'da (rate-limit himoyasi bilan, ketma-ket)
 // boshlaydi. Bitta yozuv xato bersa (masalan pinfl/sana noto'g'ri),
@@ -301,7 +421,7 @@ const syncRawRecordsWithGcp = async (user, records) => {
   const total = records.length;
   startSync(key, total);
 
-  console.log(`[GCP sync] boshlandi: jami ${total} ta yozuv`);
+  console.log(`[Sync] boshlandi: jami ${total} ta yozuv`);
 
   try {
     for (const [index, record] of records.entries()) {
@@ -311,14 +431,68 @@ const syncRawRecordsWithGcp = async (user, records) => {
       try {
         const isoBirthDate = toIsoDate(record.birthDate);
 
-        if (!record.pinfl || !isoBirthDate) {
-          throw new Error("JSHSHIR yoki tug'ilgan sana noto'g'ri/yo'q");
+        if (!isoBirthDate) {
+          throw new Error("Tug'ilgan sana noto'g'ri/yo'q");
         }
 
-        const gcpData = await fetchGcpData(record.pinfl, isoBirthDate, key);
+        // Yozuvni aniqlashning ikki yo'li bor va ular ketma-ket
+        // ishlatiladi:
+        //  1. JSHSHIR yo'q, lekin tug'ilganlik guvohnomasi bor —
+        //     FHDYO bazasidan qidiramiz. U bolaning JSHSHIR'ini va
+        //     ota-ona ma'lumotini qaytaradi.
+        //  2. JSHSHIR ma'lum bo'lgach (yo avvaldan, yo 1-bosqichdan) —
+        //     GCP'dan so'raymiz: bola pasport/ID karta olgan bo'lsa,
+        //     hujjat ma'lumoti o'shanga yangilanadi.
+        let pinfl = record.pinfl;
+        let viaBirthCert = false;
 
-        if (!gcpData || Object.keys(gcpData).length === 0) {
-          throw new Error("GCP'da ma'lumot topilmadi");
+        if (needsBirthCert(record)) {
+          const certResponse = await fetchBirthCertData(
+            record.documentSeries,
+            record.documentNumber,
+            isoBirthDate,
+            key,
+          );
+
+          const certUpdate = mapBirthCertUpdate(certResponse);
+          if (!certUpdate) {
+            throw new Error(
+              certResponse?.message || "Guvohnoma bo'yicha ma'lumot topilmadi",
+            );
+          }
+
+          await RawRecord.updateOne({ _id: record._id }, { $set: certUpdate });
+          pinfl = certUpdate.pinfl ?? null;
+          viaBirthCert = true;
+        }
+
+        if (!pinfl) {
+          if (viaBirthCert) {
+            // Guvohnoma topildi, lekin JSHSHIR hali berilmagan —
+            // bu xato emas, shunchaki GCP bosqichi o'tkazib yuboriladi.
+            tickSync(key);
+            console.log(
+              `[Sync] ${position}/${total} — OK guvohnoma, JSHSHIR yo'q (${record.fullName}) ${Date.now() - startedAt}ms`,
+            );
+            continue;
+          }
+          throw new Error("JSHSHIR ham, tug'ilganlik guvohnomasi ham yo'q");
+        }
+
+        const gcpData = await fetchGcpData(pinfl, isoBirthDate, key);
+
+        // code !== 0 — GCP bu JSHSHIR bo'yicha ma'lumot topa olmadi
+        // (masalan bola hali pasport olmagan). Guvohnoma orqali
+        // yangilangan bo'lsa, bu yetarli — xato deb hisoblamaymiz.
+        if (!gcpData || gcpData.code !== 0) {
+          if (viaBirthCert) {
+            tickSync(key);
+            console.log(
+              `[Sync] ${position}/${total} — OK guvohnoma (pasport hali yo'q) (${record.fullName}) ${Date.now() - startedAt}ms`,
+            );
+            continue;
+          }
+          throw new Error(gcpData?.message || "GCP'da ma'lumot topilmadi");
         }
 
         await RawRecord.updateOne(
@@ -327,12 +501,14 @@ const syncRawRecordsWithGcp = async (user, records) => {
         );
 
         tickSync(key);
-        console.log(`[GCP sync] ${position}/${total} — OK (${record.fullName ?? record.pinfl}) ${Date.now() - startedAt}ms`);
+        console.log(
+          `[Sync] ${position}/${total} — OK${viaBirthCert ? " guvohnoma→pasport" : ""} (${record.fullName ?? pinfl}) ${Date.now() - startedAt}ms`,
+        );
       } catch (err) {
         const reason =
           err.response?.data?.message || err.message || "Noma'lum xatolik";
 
-        console.log(`[GCP sync] ${position}/${total} — XATO (${record.fullName ?? record.pinfl}): ${reason} ${Date.now() - startedAt}ms`);
+        console.log(`[Sync] ${position}/${total} — XATO (${record.fullName ?? record.pinfl}): ${reason} ${Date.now() - startedAt}ms`);
 
         tickSync(key, {
           failed: true,
@@ -346,7 +522,7 @@ const syncRawRecordsWithGcp = async (user, records) => {
       }
     }
 
-    console.log(`[GCP sync] tugadi: ${total} tadan ${total - (getSyncProgress(key)?.failed ?? 0)} tasi muvaffaqiyatli`);
+    console.log(`[Sync] tugadi: ${total} tadan ${total - (getSyncProgress(key)?.failed ?? 0)} tasi muvaffaqiyatli`);
     finishSync(key);
   } catch (err) {
     failSync(key, err.message);
@@ -366,7 +542,11 @@ export const syncRawRecordsGcp = async (req, res) => {
 
   const onlyMissing = req.query.onlyMissing === "true";
   const filter = { userUid: user.uid };
-  if (onlyMissing) filter.gcpSyncedAt = null;
+  // Hech bir manbadan (GCP yoki guvohnoma) yangilanmaganlar.
+  if (onlyMissing) {
+    filter.gcpSyncedAt = null;
+    filter.birthCertSyncedAt = null;
+  }
 
   const records = await RawRecord.find(filter);
 

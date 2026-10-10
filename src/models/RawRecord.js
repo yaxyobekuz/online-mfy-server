@@ -18,6 +18,14 @@ const rawRecordSchema = new Schema(
 
     fullName: { type: String },
     cadasterNumber: { type: String },
+
+    // Kadastr aniq bo'lmagan hollarda (odatda bolalar — ular davlat
+    // reyestrida yo'q, kadastr oila a'zosidan olinadi) bir nechta
+    // ehtimoliy variant bo'ladi. cadasterNumber — eng ishonchlisi,
+    // bu yerda esa qolganlari ishonch tartibida turadi: asosiysi mos
+    // kelmasa, shular bilan tekshirib ko'riladi.
+    alternateCadasters: { type: [String], default: undefined },
+
     relationship: { type: String },
     pinfl: { type: String },
     documentType: { type: String },
@@ -30,6 +38,20 @@ const rawRecordSchema = new Schema(
     // Excel qatorining asl (xom) ko'rinishi — kelajakda qo'shimcha
     // ustunlar chiqsa ham ma'lumot yo'qolmasligi uchun.
     raw: { type: Schema.Types.Mixed },
+
+    // Tug'ilganlik guvohnomasi bo'yicha (FHDYO bazasi) aniqlangan
+    // ota-ona ma'lumotlari. Bolada JSHSHIR bo'lmagani uchun uni
+    // oilasiga bog'lashning yagona ishonchli yo'li shu.
+    fatherFullName: { type: String },
+    fatherPinfl: { type: String },
+    fatherBirthDate: { type: String },
+    motherFullName: { type: String },
+    motherPinfl: { type: String },
+    motherBirthDate: { type: String },
+
+    // FHDYO (tug'ilganlik guvohnomasi) bazasidan kelgan to'liq javob.
+    birthCertData: { type: Schema.Types.Mixed },
+    birthCertSyncedAt: { type: Date },
 
     // Davlat pasport bazasidan (GCP, pinfl+birth_date orqali) kelgan
     // so'nggi ma'lumotning to'liq javobi — kelajakda kerak bo'lsa
