@@ -289,18 +289,33 @@ const shortenDocumentType = (type) => {
   if (!type) return null;
   if (/ID[- ]?karta/i.test(type)) return "ID karta";
   if (/pasport|passport/i.test(type)) return "Passport";
+  // Guvohnomani ham bir xil shaklga keltiramiz. GCP uni turli
+  // apostrof belgilari bilan qaytaradi ("Tug‘ilganlik", "Tug'ilganlik")
+  // — platformaga yuborishdagi hujjat turi jadvali esa aniq matn
+  // bo'yicha moslashtiradi, shuning uchun yagona shaklda yozamiz.
+  if (/gu?vohnoma/i.test(type)) return "Tug'ilganlik guvohnomasi";
   return type;
 };
 
 // GCP "current_document" ni seriya va raqam birga yopishgan holda
-// beradi ("AE8520186" = seriya "AE" + raqam "8520186"). Jadvalda
-// ular alohida ustunlarda ko'rinishi kerak, shuning uchun ajratamiz.
-// Kutilmagan shakl kelsa, ajratmasdan raqam sifatida qoldiramiz.
+// beradi. Ikki shakl uchraydi:
+//   pasport/ID karta — "AE8520186"     (seriya "AE" + raqam "8520186")
+//   guvohnoma        — "I-AN0833845"   (seriya "I-AN" + raqam "0833845")
+// Jadvalda ular alohida ustunlarda ko'rinishi kerak, platformaga
+// yuborishda ham doc_serial/doc_number alohida ketadi — shuning uchun
+// ikkala shaklni ham ajratamiz. Kutilmagan shakl kelsa, ajratmasdan
+// raqam sifatida qoldiramiz.
 const splitDocument = (document) => {
-  const match = String(document ?? "").match(/^([A-Z]{2})(\d{7})$/i);
-  if (!match) return { series: null, number: document ?? null };
+  const value = String(document ?? "").trim().replace(/\s+/g, "");
 
-  return { series: match[1].toUpperCase(), number: match[2] };
+  // Guvohnoma: rim raqami + "-" + ikki harf, keyin raqamlar.
+  const cert = value.match(/^([IVX]+-[A-Z]{2})(\d+)$/i);
+  if (cert) return { series: cert[1].toUpperCase(), number: cert[2] };
+
+  const passport = value.match(/^([A-Z]{2})(\d{7})$/i);
+  if (passport) return { series: passport[1].toUpperCase(), number: passport[2] };
+
+  return { series: null, number: document ?? null };
 };
 
 // GCP javobidan RawRecord'ning F.I.Sh./hujjat/sana maydonlarini
@@ -363,9 +378,17 @@ const fetchBirthCertData = (series, number, birthDate, progressKey) =>
     },
   ).then((response) => response.data);
 
-// FHDYO javobi uch qavatli: { data: { info: { data: {...} } } } —
-// haqiqiy ma'lumot eng ichkarida.
-const extractBirthCertPerson = (response) => response?.data?.info?.data ?? null;
+// FHDYO javobi ko'p qavatli. api config'dagi interceptor birinchi
+// qavatni (axios'ning `res.data`), fetchBirthCertData esa ikkinchisini
+// (javobning `data` maydonini) ochib beradi. Shuning uchun bu yerga
+// { insert_data, birth_date2, info: { data: {...} } } ko'rinishida
+// keladi va haqiqiy ma'lumot `info.data` ichida bo'ladi.
+//
+// Ilgari bu yerda yana bir `data` qavati o'qilgan edi — natijada
+// funksiya HAR DOIM null qaytarib, guvohnomali bolalarning hammasi
+// "Guvohnoma bo'yicha ma'lumot topilmadi" xatosi bilan tushgan.
+const extractBirthCertPerson = (response) =>
+  response?.info?.data ?? response?.data?.info?.data ?? null;
 
 // FHDYO javobidan to'liq ismni yig'adi (u uch bo'lakda keladi).
 const joinName = (surname, name, patronym) =>
@@ -389,6 +412,11 @@ const mapBirthCertUpdate = (response) => {
     // dastlabki yozuvda xato bo'lsa).
     documentSeries: person.cert_series,
     documentNumber: person.cert_number,
+    // Hujjat turini aniq yozib qo'yamiz: platformaga yuborishda
+    // document_type kodi (2 = tug'ilganlik guvohnomasi) shu maydon
+    // orqali aniqlanadi. Excel'da bu ustun bo'sh qolgan bo'lsa,
+    // yozuv "Hujjat turi mos kelmadi" deb o'tkazib yuborilardi.
+    documentType: "Tug'ilganlik guvohnomasi",
     // Bolaga JSHSHIR berilgan bo'lsa — saqlaymiz. Shundan keyin u
     // GCP orqali ham tekshiriladi (pasport/ID karta olgan bo'lishi
     // mumkin).

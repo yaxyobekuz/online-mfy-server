@@ -1,6 +1,7 @@
 import api from "../config/api.js";
 import RawRecord from "../models/RawRecord.js";
 import Home from "../models/Home.js";
+import FamilyMember from "../models/FamilyMember.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { withRateLimit } from "../utils/rate-limit.js";
 import {
@@ -149,10 +150,20 @@ const buildPayload = (record, home) => {
     return { skip: "Tug'ilgan sana noto'g'ri yoki yo'q" };
   }
 
-  // Guvohnomali bolalarda JSHSHIR bo'lmasligi mumkin — platforma
-  // buni qabul qiladi (hujjat seriya/raqami orqali aniqlanadi).
   if (!record.documentSeries || !record.documentNumber) {
     return { skip: "Hujjat seriyasi yoki raqami yo'q" };
+  }
+
+  // Platforma JSHSHIR'ni majburiy talab qiladi — bo'sh yuborilsa
+  // "pinfl: Bo'sh bo'lmasligi kerak" deb 400 qaytaradi. Guvohnomali
+  // bolalarda ham shunday: ularning JSHSHIR'i FHDYO bazasida bor va
+  // "So'nggi ma'lumotlarga yangilash" bosqichida yoziladi. Shuning
+  // uchun JSHSHIR'siz yozuvni umuman yubormaymiz — bekorga xato
+  // olmaslik uchun.
+  if (!record.pinfl) {
+    return {
+      skip: "JSHSHIR yo'q — avval \"So'nggi ma'lumotlarga yangilash\" kerak",
+    };
   }
 
   if (!home.pinfl) {
@@ -165,7 +176,13 @@ const buildPayload = (record, home) => {
 
   return {
     payload: {
-      pinfl: record.pinfl ? Number(record.pinfl) : null,
+      pinfl: Number(record.pinfl),
+      // F.I.Sh. va tug'ilgan sana "So'nggi ma'lumotlarga yangilash"
+      // bosqichida davlat bazasidagi qiymat bilan almashtirilgan
+      // bo'ladi. Bu muhim: platforma yuborilgan ma'lumotni rasmiy
+      // baza bilan solishtiradi va farq bo'lsa "Маълумотлар мувофиқ
+      // эмас" deb rad etadi (Excel'da sana bir-ikki kun yoki ism
+      // bir harf xato bo'lishi uchragan).
       full_name: record.fullName,
       address: null,
       phone: record.phone ?? "",
@@ -276,7 +293,12 @@ export const getFamilyAddLogs = (key) => logsByKey.get(key) ?? [];
  * shuning uchun qayta ishga tushirilganda bir xil yozuv ikkinchi
  * marta yuborilmaydi.
  */
-const addFamilyMembers = async (user, records, homesByCadaster) => {
+const addFamilyMembers = async (
+  user,
+  records,
+  homesByCadaster,
+  knownPinfls = new Set(),
+) => {
   const key = familyAddKey(user.uid);
   const total = records.length;
   startSync(key, total);
@@ -292,7 +314,16 @@ const addFamilyMembers = async (user, records, homesByCadaster) => {
     for (const [index, record] of records.entries()) {
       const position = index + 1;
       const startedAt = Date.now();
-      const home = homesByCadaster.get(record.cadasterNumber);
+
+      // Asosiy kadastr topilmasa, ehtimoliy variantlar bilan ham
+      // tekshiramiz. Bolalarda kadastr o'z hujjatidan emas, oila
+      // a'zosidan olinadi — shuning uchun bir nechta variant bo'ladi
+      // va ular `alternateCadasters` ichida ishonch tartibida turadi.
+      let home = homesByCadaster.get(record.cadasterNumber);
+      for (const alternate of record.alternateCadasters ?? []) {
+        if (home) break;
+        home = homesByCadaster.get(alternate);
+      }
 
       if (!home) {
         const reason = "Bu kadastr platformada topilmadi";
@@ -322,6 +353,34 @@ const addFamilyMembers = async (user, records, homesByCadaster) => {
             reason,
           },
         });
+        continue;
+      }
+
+      // Platformada bu JSHSHIR allaqachon bormi? Bo'lsa, so'rov
+      // yubormaymiz: platforma baribir rad etadi, so'rov esa
+      // rate-limitdan bekorga "yeb" ketadi.
+      if (record.pinfl && knownPinfls.has(String(record.pinfl))) {
+        const reason = "Platformada allaqachon ro'yxatda (qayta kiritilmaydi)";
+        await RawRecord.updateOne(
+          { _id: record._id },
+          {
+            $set: {
+              familyAddStatus: "skipped",
+              familyAddError: reason,
+              familyAddAt: new Date(),
+              familyAddHomeId: home.homeId,
+            },
+          },
+        );
+
+        pushLog(key, {
+          level: "skip",
+          position,
+          total,
+          fullName: record.fullName,
+          message: reason,
+        });
+        tickSync(key);
         continue;
       }
 
@@ -391,6 +450,11 @@ const addFamilyMembers = async (user, records, homesByCadaster) => {
           { _id: home._id },
           { $set: { familySyncedAt: null } },
         );
+
+        // Shu yurishning o'zida bir xil odam ikkinchi marta
+        // uchrashi mumkin (Excel'da takrorlangan qator). Endi u
+        // platformada bor — belgilab qo'yamiz.
+        if (record.pinfl) knownPinfls.add(String(record.pinfl));
 
         pushLog(key, {
           level: "success",
@@ -496,6 +560,12 @@ const addFamilyMembers = async (user, records, homesByCadaster) => {
 const pendingFilter = (userUid) => ({
   userUid,
   familyAddStatus: { $exists: false },
+  // Hujjati eskirgan yozuvni yubormaymiz: davlat bazasida uning
+  // hujjati yaroqsiz deb turgan bo'lsa, platforma ham qabul qilmaydi.
+  documentExpired: { $ne: true },
+  // JSHSHIR'i yo'q yozuvni ham yubormaymiz — platforma uni majburiy
+  // talab qiladi (pastdagi buildPayload'da ham tekshiriladi).
+  pinfl: { $nin: [null, ""] },
   $or: [
     { gcpSyncedAt: { $ne: null } },
     { birthCertSyncedAt: { $ne: null } },
@@ -531,7 +601,19 @@ export const startFamilyAdd = async (req, res) => {
     if (home.cadasterNumber) homesByCadaster.set(home.cadasterNumber, home);
   }
 
-  addFamilyMembers(user, records, homesByCadaster);
+  // Platformada allaqachon ro'yxatda turgan odamlarning JSHSHIR'lari.
+  // Platforma bir shaxsni ikki joyga qo'shishga ruxsat bermaydi
+  // ("Ушбу шахс хонадон аъзолари жадвалига киритилган!"), shuning
+  // uchun bunday yozuvga bekorga so'rov yubormaymiz.
+  const knownPinfls = new Set();
+  for (const member of await FamilyMember.find({ userUid: user.uid }, "pinfl")) {
+    if (member.pinfl) knownPinfls.add(String(member.pinfl));
+  }
+  for (const home of homes) {
+    if (home.pinfl) knownPinfls.add(String(home.pinfl));
+  }
+
+  addFamilyMembers(user, records, homesByCadaster, knownPinfls);
 
   return res.status(202).json({ total: records.length });
 };
@@ -567,13 +649,29 @@ export const getFamilyAddStats = async (req, res) => {
   try {
     const filter = { userUid: user.uid };
 
-    const [total, success, failed, skipped, pending] = await Promise.all([
-      RawRecord.countDocuments(filter),
-      RawRecord.countDocuments({ ...filter, familyAddStatus: "success" }),
-      RawRecord.countDocuments({ ...filter, familyAddStatus: "failed" }),
-      RawRecord.countDocuments({ ...filter, familyAddStatus: "skipped" }),
-      RawRecord.countDocuments(pendingFilter(user.uid)),
-    ]);
+    const untried = { ...filter, familyAddStatus: { $exists: false } };
+
+    const [total, success, failed, skipped, pending, notSynced, expired] =
+      await Promise.all([
+        RawRecord.countDocuments(filter),
+        RawRecord.countDocuments({ ...filter, familyAddStatus: "success" }),
+        RawRecord.countDocuments({ ...filter, familyAddStatus: "failed" }),
+        RawRecord.countDocuments({ ...filter, familyAddStatus: "skipped" }),
+        RawRecord.countDocuments(pendingFilter(user.uid)),
+        // Hali urinilmagan, lekin yangilanmagani (yoki JSHSHIR'i
+        // yo'qligi) uchun kiritib bo'lmaydiganlar. Avval bu son
+        // ayirish orqali hisoblanardi — natijada boshqa sabab bilan
+        // chetda qolgan yozuvlar ham "yangilanmagan" deb ko'rinardi.
+        RawRecord.countDocuments({
+          ...untried,
+          documentExpired: { $ne: true },
+          $or: [
+            { pinfl: { $in: [null, ""] } },
+            { gcpSyncedAt: null, birthCertSyncedAt: null },
+          ],
+        }),
+        RawRecord.countDocuments({ ...untried, documentExpired: true }),
+      ]);
 
     return res.status(200).json({
       total,
@@ -583,7 +681,9 @@ export const getFamilyAddStats = async (req, res) => {
       // Kiritishga tayyor (yangilangan va hali urinilmagan)
       pending,
       // Yangilanmagani uchun hozircha kiritib bo'lmaydiganlar
-      notSynced: total - success - failed - skipped - pending,
+      notSynced,
+      // Hujjati eskirgani uchun umuman yuborilmaydiganlar
+      expired,
     });
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
