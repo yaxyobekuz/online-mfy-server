@@ -2,7 +2,7 @@ import RegistrationRun from "../models/RegistrationRun.js";
 import MahallaToken from "../models/MahallaToken.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { getRateLimitState } from "../utils/rate-limit.js";
-import { isRunActive } from "../services/registration-worker.js";
+import { isRunActiveAnywhere, runOwner } from "../services/registration-worker.js";
 
 /**
  * Jonli uzatish (SSE — Server-Sent Events).
@@ -77,7 +77,10 @@ export const streamRegistrationState = async (req, res) => {
         membersAdded: run.membersAdded,
         membersFailed: run.membersFailed,
         membersSkipped: run.membersSkipped,
-        isActive: isRunActive(run._id),
+        isActive: isRunActiveAnywhere(run),
+        // Qaysi server olib boryapti — bir nechta server
+        // ishlaganda ko'rinib tursin.
+        owner: runOwner(run)?.name ?? null,
         // Yurishning o'z kutishi (ishchi yozadi).
         waitingUntil: run.waitingUntil ?? null,
         // Tashqi API limiti holati.

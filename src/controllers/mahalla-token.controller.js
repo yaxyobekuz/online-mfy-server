@@ -5,7 +5,7 @@ import Citizen from "../models/Citizen.js";
 import RegistrationRun from "../models/RegistrationRun.js";
 import { getRequestUser, requestContext } from "../utils/request-context.js";
 import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
-import { isRunActive } from "../services/registration-worker.js";
+import { isRunActiveAnywhere } from "../services/registration-worker.js";
 import Street from "../models/Street.js";
 import { withRateLimit } from "../utils/rate-limit.js";
 
@@ -76,7 +76,7 @@ export const getMahallaTokens = async (req, res) => {
                 homesTotal: run.homesTotal,
                 membersAdded: run.membersAdded,
                 membersFailed: run.membersFailed,
-                isActive: isRunActive(run._id),
+                isActive: isRunActiveAnywhere(run),
               }
             : null,
         };
@@ -174,7 +174,7 @@ export const deleteMahallaToken = async (req, res) => {
       status: { $in: ["preparing", "running"] },
     }).lean();
 
-    if (running && isRunActive(running._id)) {
+    if (running && isRunActiveAnywhere(running)) {
       return res.status(409).json({
         message: "Bu token bo'yicha jarayon ketmoqda — avval to'xtating",
       });

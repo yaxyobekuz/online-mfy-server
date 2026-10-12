@@ -13,7 +13,6 @@ import { getRateLimitState } from "../utils/rate-limit.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
 import {
   runRegistration,
-  isRunActive,
   isRunActiveAnywhere,
   runOwner,
 } from "../services/registration-worker.js";
@@ -237,7 +236,7 @@ export const getRegistrationMahallas = async (req, res) => {
                 homesTotal: run.homesTotal,
                 membersAdded: run.membersAdded,
                 membersFailed: run.membersFailed,
-                isActive: isRunActive(run._id),
+                isActive: isRunActiveAnywhere(run),
                 finishedAt: run.finishedAt,
               }
             : null,
@@ -505,7 +504,7 @@ export const controlRegistration = async (req, res) => {
     // Ishchi ishlamayotgan bo'lsa (masalan server qayta ishga
     // tushgan), holatni o'zimiz yopamiz — aks holda "running" deb
     // qotib qolardi.
-    if (!isRunActive(run._id)) {
+    if (!isRunActiveAnywhere(run)) {
       run.status = action === "pause" ? "paused" : "stopped";
       run.waitingUntil = null;
       if (action === "stop") run.finishedAt = new Date();
@@ -1012,7 +1011,7 @@ export const retryRegistrationFailures = async (req, res) => {
     });
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
-    if (isRunActive(run._id)) {
+    if (isRunActiveAnywhere(run)) {
       return res
         .status(409)
         .json({ message: "Jarayon ketmoqda — avval to'xtatish kerak" });
@@ -1085,7 +1084,7 @@ export const deleteRegistrationRun = async (req, res) => {
     });
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
-    if (isRunActive(run._id)) {
+    if (isRunActiveAnywhere(run)) {
       return res.status(409).json({
         message: "Jarayon ketmoqda — avval to'xtatish kerak",
       });
