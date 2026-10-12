@@ -1,10 +1,12 @@
 import mongoose from "mongoose";
+import XLSX from "xlsx";
 import Citizen from "../models/Citizen.js";
 import Home from "../models/Home.js";
 import RegistrationRun from "../models/RegistrationRun.js";
+import MahallaToken from "../models/MahallaToken.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
-import { getRequestUser } from "../utils/request-context.js";
+import { getRequestUser, getRequestToken } from "../utils/request-context.js";
 import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
 import { getRunLogs } from "../utils/registration-log.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
@@ -46,8 +48,15 @@ const describeRun = (run) => {
   const isActive = isRunActive(run._id);
   const isStale = run.status === "running" && !isActive;
 
+  // Token javobga TUSHMASLIGI kerak. Sxemada `select: false`, lekin
+  // davom ettirish uchun ba'zi joylarda `+token` bilan o'qiladi —
+  // shuning uchun bu yerda aniq olib tashlanadi, aks holda bitta
+  // e'tiborsizlik maxfiy ma'lumotni client'ga chiqarib yuborardi.
+  const { token, ...safe } = run;
+  void token;
+
   return {
-    ...run,
+    ...safe,
     id: String(run._id),
     homesPercent,
     isActive,
@@ -118,11 +127,26 @@ export const getRegistrationMahallas = async (req, res) => {
     // Tekshirish platformadagi mavjud xonadonlar (Home) kadastrlari
     // bo'yicha ketadi: ular allaqachon yuklangan va tashqi API'ga
     // qayta so'rov yubormaydi.
-    const ownCadasters = new Set(
-      (await Home.distinct("cadasterNumber", { userUid: user.uid })).filter(
-        Boolean,
-      ),
-    );
+    // Qaysi kadastr qaysi TOKEN ga tegishli ekanini ham bilamiz:
+    // bir nechta MFY tokeni qo'shilgan bo'lsa, har mahalla o'z
+    // tokeni bilan boshlanishi kerak.
+    const tokenOwners = await MahallaToken.find({}, "uid").lean();
+    const ownerUids = [user.uid, ...tokenOwners.map((t) => t.uid)];
+
+    const cadasterOwner = new Map();
+
+    for (const uid of new Set(ownerUids)) {
+      for (const cadaster of await Home.distinct("cadasterNumber", {
+        userUid: uid,
+      })) {
+        // Birinchi egasi qoladi: bitta kadastr bitta MFY ga tegishli.
+        if (cadaster && !cadasterOwner.has(cadaster)) {
+          cadasterOwner.set(cadaster, uid);
+        }
+      }
+    }
+
+    const ownCadasters = new Set(cadasterOwner.keys());
 
     // Har mahalla uchun eng yangi yurish — ro'yxatda holat ko'rinib
     // turishi uchun.
@@ -148,9 +172,20 @@ export const getRegistrationMahallas = async (req, res) => {
         // Shu mahallaning nechta kadastri platformada bor — ya'ni
         // amalda nechtasini ishlash mumkin.
         let available = 0;
+        // Mahalla kadastrlari qaysi token egasiga tegishli — eng
+        // ko'p uchragani mahalla egasi deb olinadi.
+        const ownerCounts = new Map();
+
         for (const cadaster of entry.cadasters) {
-          if (ownCadasters.has(cadaster)) available += 1;
+          if (!ownCadasters.has(cadaster)) continue;
+
+          available += 1;
+          const owner = cadasterOwner.get(cadaster);
+          if (owner) ownerCounts.set(owner, (ownerCounts.get(owner) ?? 0) + 1);
         }
+
+        const ownerUid =
+          [...ownerCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 
         return {
           key: entry.key,
@@ -162,6 +197,9 @@ export const getRegistrationMahallas = async (req, res) => {
           // Platformada mavjud (tokenga ko'rinadigan) kadastrlar.
           availableCadasters: available,
           isAvailable: available > 0,
+          // Shu mahalla qaysi token egasiga tegishli — client
+          // boshlashda o'sha tokenni uzatadi.
+          ownerUid,
           run: run
             ? {
                 id: String(run._id),
@@ -215,15 +253,19 @@ export const getRegistrationRuns = async (req, res) => {
 /**
  * Yangi yurishni boshlaydi.
  *
- * Body: { mahalla: "<key>" }
+ * Body: { mahalla: "<key>", tokenId?: "<id>" }
  *
- * Bir vaqtda bitta yurish ishlaydi: tashqi API limiti umumiy,
- * ikki yurish parallel ketsa ikkalasi ham sekinlashadi va 429
- * xatolari ko'payadi.
+ * `tokenId` berilsa, yurish O'SHA MFY tokeni bilan ketadi — ya'ni
+ * foydalanuvchi o'z seansidan turib boshqa mahallani ham boshlay
+ * oladi. Berilmasa, joriy so'rov tokeni ishlatiladi.
+ *
+ * Turli MFY yurishlari PARALLEL ketaveradi: har birining o'z tokeni
+ * va o'z rate-limit oqimi bor (`adaptiveKey` foydalanuvchi bo'yicha),
+ * shuning uchun bir-biriga xalaqit bermaydi.
  */
 export const startRegistration = async (req, res) => {
-  const user = requireUser(res);
-  if (!user) return;
+  const requester = requireUser(res);
+  if (!requester) return;
 
   const key = String(req.body?.mahalla ?? req.query.mahalla ?? "").trim();
   if (!key) {
@@ -231,15 +273,49 @@ export const startRegistration = async (req, res) => {
   }
 
   try {
-    // Allaqachon ishlab turgan yurish bormi?
+    // Yurish qaysi MFY nomidan ketadi: boshqa tokenmi yoki o'zimizniki.
+    let user = requester;
+    let token = getRequestToken();
+
+    const tokenId = String(req.body?.tokenId ?? "").trim();
+
+    if (tokenId) {
+      if (!mongoose.isValidObjectId(tokenId)) {
+        return res.status(400).json({ message: "Token ID'si noto'g'ri" });
+      }
+
+      const entry = await MahallaToken.findById(tokenId).select("+token");
+      if (!entry) return res.status(404).json({ message: "Token topilmadi" });
+
+      // Yurish token EGASI nomidan ketadi — hudud, xonadonlar va
+      // rate-limit oqimi o'shanikidir.
+      user = {
+        uid: entry.uid,
+        username: entry.username,
+        oblId: entry.oblId,
+        areaId: entry.areaId,
+        districtId: entry.districtId,
+      };
+      token = entry.token;
+    }
+
+    // SHU MAHALLA uchun yurish allaqachon ketyaptimi?
+    //
+    // Cheklov ataylab mahalla darajasida: har MFY ning o'z tokeni
+    // bor, tashqi API limiti ham token bo'yicha hisoblanadi.
+    // Shuning uchun turli MFY lar bir-biriga xalaqit bermasdan
+    // PARALLEL ishlay oladi. Bitta mahallani esa ikki marta
+    // boshlash mumkin emas — bir xonadon ikki marta ishlanib,
+    // platformaga dublikat so'rov ketardi.
     const running = await RegistrationRun.findOne({
       userUid: user.uid,
+      mahallaKey: key,
       status: { $in: ["preparing", "running"] },
     }).lean();
 
     if (running && isRunActive(running._id)) {
       return res.status(409).json({
-        message: "Jarayon allaqachon ketmoqda",
+        message: "Bu mahalla bo'yicha jarayon allaqachon ketmoqda",
         runId: String(running._id),
       });
     }
@@ -251,13 +327,21 @@ export const startRegistration = async (req, res) => {
       userUid: user.uid,
       mahallaKey: key,
       status: { $in: ["pending", "preparing", "running", "paused"] },
-    }).sort({ createdAt: -1 });
+    })
+      .select("+token")
+      .sort({ createdAt: -1 });
 
     if (resumable) {
       resumable.control = "run";
+      // Token yangilangan bo'lishi mumkin — har safar joriysini
+      // yozamiz, shunda eskirgan token bilan davom etilmaydi.
+      resumable.token = token;
+      resumable.oblId = user.oblId;
+      resumable.areaId = user.areaId;
+      resumable.districtId = user.districtId;
       await resumable.save();
 
-      runRegistration(user, resumable);
+      runRegistration(user, resumable, resumable.token);
 
       return res.status(202).json({
         runId: String(resumable._id),
@@ -288,10 +372,16 @@ export const startRegistration = async (req, res) => {
       status: "pending",
       control: "run",
       userUid: user.uid,
+      // Ishchi fonda, so'rov tugagandan keyin ham ishlaydi —
+      // shuning uchun token yurish bilan birga saqlanadi.
+      token,
+      oblId: user.oblId,
+      areaId: user.areaId,
+      districtId: user.districtId,
     });
 
     // Fonda ishga tushiramiz — javobni kutmaymiz.
-    runRegistration(user, run);
+    runRegistration(user, run, token);
 
     return res.status(202).json({ runId: String(run._id), resumed: false });
   } catch (err) {
@@ -326,7 +416,12 @@ export const controlRegistration = async (req, res) => {
   }
 
   try {
-    const run = await RegistrationRun.findOne({ _id: runId, userUid: user.uid });
+    // `+token` — sxemada `select: false`, lekin davom ettirishda
+    // eski token zaxira sifatida kerak bo'ladi.
+    const run = await RegistrationRun.findOne({
+      _id: runId,
+      userUid: user.uid,
+    }).select("+token");
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
     if (action === "resume") {
@@ -334,23 +429,20 @@ export const controlRegistration = async (req, res) => {
         return res.status(200).json({ message: "Jarayon allaqachon ketmoqda" });
       }
 
-      // Boshqa yurish ishlab turgan bo'lsa, ikkinchisini qo'shmaymiz.
-      const other = await RegistrationRun.findOne({
-        userUid: user.uid,
-        _id: { $ne: run._id },
-        status: { $in: ["preparing", "running"] },
-      }).lean();
-
-      if (other && isRunActive(other._id)) {
-        return res
-          .status(409)
-          .json({ message: "Boshqa mahalla jarayoni ketmoqda" });
-      }
+      // Boshqa MFY yurishlari parallel ketaverishi mumkin: har
+      // birining o'z tokeni va o'z rate-limit oqimi bor, shuning
+      // uchun bir-biriga xalaqit bermaydi.
 
       run.control = "run";
+      // Davom ettirishda tokenni yangilaymiz: eskisining muddati
+      // o'tgan bo'lishi mumkin.
+      run.token = getRequestToken() ?? run.token;
+      run.oblId = user.oblId;
+      run.areaId = user.areaId;
+      run.districtId = user.districtId;
       await run.save();
 
-      runRegistration(user, run);
+      runRegistration(user, run, run.token);
 
       return res.status(200).json({ message: "Davom ettirildi" });
     }
@@ -624,6 +716,8 @@ export const getRegistrationReport = async (req, res) => {
       byStreet,
       byStudyLevel,
       timing,
+      needDocument,
+      elsewhere,
     ] = await Promise.all([
       runId
         ? RegistrationRun.findOne({ _id: runId, userUid: user.uid }).lean()
@@ -693,6 +787,48 @@ export const getRegistrationReport = async (req, res) => {
           },
         },
       ]),
+
+      // Hujjati yaroqsizlar — mahalla uchun AMALIY ro'yxat: bu
+      // odamlar aktiv, faqat bazadagi hujjati eskirgan. Yangi
+      // hujjat ma'lumotini olib, ro'yxatni yangilash kerak.
+      // Bitta odam bir necha marta urinilgan bo'lishi mumkin
+      // (xonadon qayta ishlansa), ro'yxatda esa bir marta
+      // ko'rinishi kerak — JSHSHIR bo'yicha guruhlaymiz.
+      RegistrationMember.aggregate([
+        { $match: { ...memberFilter, reasonCode: "hujjat_yaroqsiz" } },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: { $ifNull: ["$pinfl", "$fullName"] },
+            fullName: { $first: "$fullName" },
+            birthDate: { $first: "$birthDate" },
+            document: { $first: "$document" },
+            pinfl: { $first: "$pinfl" },
+            cadasterNumber: { $first: "$cadasterNumber" },
+          },
+        },
+        { $sort: { fullName: 1 } },
+        { $limit: 200 },
+      ]),
+
+      // Boshqa joyda ro'yxatda turganlar — ya'ni ko'chib ketganlar.
+      // Mahalla uchun bu shunchaki "xato" emas, amaliy ma'lumot:
+      // ro'yxatni yangilash kerakligini bildiradi.
+      RegistrationMember.aggregate([
+        { $match: { ...memberFilter, registeredMahalla: { $ne: null } } },
+        {
+          $group: {
+            _id: {
+              region: "$registeredRegion",
+              mahalla: "$registeredMahalla",
+              movedAway: "$movedAway",
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { count: -1 } },
+        { $limit: 30 },
+      ]),
     ]);
 
     const toMap = (rows) =>
@@ -757,6 +893,26 @@ export const getRegistrationReport = async (req, res) => {
       })),
 
       avgMs: timing[0]?.avgMs ? Math.round(timing[0].avgMs) : null,
+
+      // Hujjati yangilanishi kerak bo'lganlar (amaliy ro'yxat).
+      needDocument: needDocument.map((row) => ({
+        id: String(row._id),
+        fullName: row.fullName,
+        birthDate: row.birthDate,
+        document: row.document,
+        pinfl: row.pinfl,
+        cadasterNumber: row.cadasterNumber,
+      })),
+
+      // Boshqa joyda ro'yxatda turganlar: qayerda va nechtasi.
+      elsewhere: elsewhere.map((row) => ({
+        region: row._id.region ?? "—",
+        mahalla: row._id.mahalla ?? "—",
+        // true — butunlay boshqa mahallada (ko'chib ketgan),
+        // false — shu mahallaning boshqa xonadonida.
+        movedAway: Boolean(row._id.movedAway),
+        count: row.count,
+      })),
     });
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
@@ -876,5 +1032,148 @@ export const deleteRegistrationRun = async (req, res) => {
     return res.status(200).json({ message: "O'chirildi" });
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+/**
+ * Hisobotni Excel faylga chiqaradi.
+ *
+ * Nega kerak: mahalla xodimi "hujjati yangilanishi kerak" va
+ * "ko'chib ketganlar" ro'yxatlari bilan AMALDA ishlaydi — odamlarga
+ * qo'ng'iroq qiladi, hujjat so'raydi. Ekrandagi ro'yxat buning
+ * uchun qulay emas.
+ *
+ * Har bo'lim alohida varaqda chiqadi.
+ */
+export const exportRegistrationReport = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  const { runId } = req.params;
+  if (!mongoose.isValidObjectId(runId)) {
+    return res.status(400).json({ message: "Yurish ID'si noto'g'ri" });
+  }
+
+  try {
+    const run = await RegistrationRun.findOne({
+      _id: runId,
+      userUid: user.uid,
+    }).lean();
+
+    if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
+
+    const [added, needDocument, elsewhere, failed] = await Promise.all([
+      RegistrationMember.find({ runId, status: "added" })
+        .sort({ createdAt: 1 })
+        .lean(),
+      RegistrationMember.aggregate([
+        { $match: { runId: new mongoose.Types.ObjectId(String(runId)), reasonCode: "hujjat_yaroqsiz" } },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: { $ifNull: ["$pinfl", "$fullName"] },
+            fullName: { $first: "$fullName" },
+            birthDate: { $first: "$birthDate" },
+            document: { $first: "$document" },
+            cadasterNumber: { $first: "$cadasterNumber" },
+          },
+        },
+        { $sort: { fullName: 1 } },
+      ]),
+      RegistrationMember.find({
+        runId,
+        registeredMahalla: { $ne: null },
+      })
+        .sort({ registeredMahalla: 1 })
+        .lean(),
+      RegistrationMember.find({ runId, status: "failed" })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    const workbook = XLSX.utils.book_new();
+
+    const sheet = (name, rows) => {
+      if (!rows.length) return;
+      XLSX.utils.book_append_sheet(
+        workbook,
+        XLSX.utils.json_to_sheet(rows),
+        name,
+      );
+    };
+
+    sheet(
+      "Kiritilganlar",
+      added.map((row, index) => ({
+        "№": index + 1,
+        "F.I.Sh.": row.verifiedFullName ?? row.fullName,
+        "Tug'ilgan sana": row.verifiedBirthDate ?? row.birthDate,
+        JSHSHIR: row.verifiedPinfl ?? row.pinfl,
+        Hujjat: `${row.verifiedDocSeries ?? ""}${row.verifiedDocNumber ?? ""}`,
+        Kadastr: row.cadasterNumber,
+        "Platforma ID": row.memberId,
+      })),
+    );
+
+    sheet(
+      "Hujjati yangilanishi kerak",
+      needDocument.map((row, index) => ({
+        "№": index + 1,
+        "F.I.Sh.": row.fullName,
+        "Tug'ilgan sana": row.birthDate,
+        "Eski hujjat": row.document,
+        Kadastr: row.cadasterNumber,
+        Izoh: "Davlat bazasida aktiv, hujjati yaroqsiz — yangisini so'rash kerak",
+      })),
+    );
+
+    sheet(
+      "Boshqa joyda ro'yxatda",
+      elsewhere.map((row, index) => ({
+        "№": index + 1,
+        "F.I.Sh.": row.verifiedFullName ?? row.fullName,
+        JSHSHIR: row.verifiedPinfl ?? row.pinfl,
+        Kadastr: row.cadasterNumber,
+        Viloyat: row.registeredRegion,
+        Mahalla: row.registeredMahalla,
+        Holati: row.movedAway ? "Ko'chib ketgan" : "Shu mahallada (boshqa xonadon)",
+      })),
+    );
+
+    sheet(
+      "Xatoliklar",
+      failed.map((row, index) => ({
+        "№": index + 1,
+        "F.I.Sh.": row.verifiedFullName ?? row.fullName,
+        JSHSHIR: row.verifiedPinfl ?? row.pinfl,
+        Kadastr: row.cadasterNumber,
+        Sabab: REASON_LABELS[row.reasonCode] ?? row.reasonCode,
+        "To'liq xabar": row.reason,
+      })),
+    );
+
+    // Bironta varaq ham bo'lmasa, bo'sh fayl o'rniga tushunarli
+    // xabar qaytaramiz.
+    if (!workbook.SheetNames.length) {
+      return res
+        .status(200)
+        .json({ message: "Hisobotda hali ma'lumot yo'q" });
+    }
+
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    const fileName = `royxat-${run.mahallaName ?? run.mahallaKey}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(fileName)}"`,
+    );
+
+    return res.send(buffer);
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Server xatoligi" });
   }
 };

@@ -36,7 +36,12 @@ import RegistrationRun from "../models/RegistrationRun.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import { withRateLimit } from "../utils/rate-limit.js";
-import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
+import { requestContext } from "../utils/request-context.js";
+import {
+  extractMahallaName,
+  mahallaKey,
+  sameMahalla,
+} from "../utils/mahalla.js";
 import {
   toIsoDate,
   splitDocument,
@@ -52,6 +57,7 @@ import {
   pickStudyLevel,
   yearsOld,
   reasonCodeOf,
+  parseRegisteredPlace,
 } from "../utils/registration-codes.js";
 import { pushRunLog } from "../utils/registration-log.js";
 
@@ -888,8 +894,30 @@ const registerOneMember = async (
       takenPinfls.add(String(verified.pinfl));
     }
 
+    // Platforma "boshqa xonadonda ro'yxatda" desa, xabar ichida
+    // o'sha joyning manzili bo'ladi. Uni ajratib saqlaymiz: mahalla
+    // xodimi uchun "odam qayerga ko'chib ketgan" degan savol
+    // hisobotdan ko'rinib tursin.
+    const place = parseRegisteredPlace(reason);
+    const placeFields = place
+      ? {
+          registeredRegion: place.region,
+          registeredMahalla: place.mahalla,
+          // O'z mahallamizda boshqa xonadondami yoki butunlay
+          // boshqa joydami — ikkisi mahalla uchun turli ma'no
+          // anglatadi.
+          //
+          // Taqqoslash `sameMahalla` orqali: platforma mahalla
+          // nomini biroz boshqacha yozadi ("Сарновул" / "САРНАВУЛ"),
+          // oddiy kalit solishtiruvi esa o'z mahallasini "ko'chib
+          // ketgan" deb ko'rsatib qo'yadi.
+          movedAway: !sameMahalla(place.mahalla, run.mahallaName),
+        }
+      : {};
+
     await finish({
       ...verifiedFields,
+      ...placeFields,
       status: "failed",
       reason,
       reasonCode,
@@ -1424,12 +1452,28 @@ const prepareQueue = async (user, run) => {
  * Yurishni boshlaydi yoki davom ettiradi. Chaqiruvchi KUTMAYDI:
  * javob darhol qaytariladi, jarayon fonda davom etadi.
  */
-export const runRegistration = async (user, runDoc) => {
+export const runRegistration = async (user, runDoc, token) => {
   const runId = String(runDoc._id);
 
   if (activeRuns.has(runId)) return;
   activeRuns.add(runId);
 
+  // Ishchi O'Z so'rov kontekstida ishlaydi — ya'ni o'z tokeni bilan.
+  //
+  // Nega kerak: har MFY ning alohida tokeni bor va tashqi API faqat
+  // o'sha token egasining hududini ko'rsatadi. Bir nechta MFY
+  // parallel ishlaganda har biri o'z tokenini ishlatishi shart,
+  // aks holda ikkinchisi birinchisining hududini so'rab qolardi.
+  //
+  // Kontekst fon vazifasiga meros bo'lib o'tadi, lekin unga
+  // tayanmaymiz: bu yerda ataylab yangi kontekst ochiladi, shunda
+  // yurish server qayta ishga tushgandan keyin ham (saqlangan token
+  // bilan) davom eta oladi.
+  return requestContext.run({ token, user }, () => runWorker(user, runDoc));
+};
+
+const runWorker = async (user, runDoc) => {
+  const runId = String(runDoc._id);
   const run = runDoc;
 
   try {

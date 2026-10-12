@@ -83,6 +83,24 @@ const registrationRunSchema = new Schema(
     // Yurishni boshlagan foydalanuvchi. Tashqi API so'rovlari shu
     // foydalanuvchining hududi (obl/area/district) bo'yicha ketadi.
     userUid: { type: String, required: true, index: true },
+
+    // Yurish qaysi token bilan ketyapti.
+    //
+    // Nega saqlanadi: har MFY ning o'z tokeni bor va tashqi API
+    // faqat o'sha token egasining hududini ko'rsatadi. Ishchi esa
+    // fonda, so'rov tugagandan keyin ham ishlaydi — ya'ni so'rov
+    // kontekstidagi tokenga tayanib bo'lmaydi.
+    //
+    // DIQQAT: bu maxfiy ma'lumot. Hech qaysi endpoint uni
+    // qaytarmaydi (`describeRun` da ataylab olib tashlanadi).
+    token: { type: String, select: false },
+
+    // Yurish egasining hudud ID'lari — tashqi API so'rovlari uchun.
+    // Token bilan birga saqlanadi, chunki ishchi qayta tiklanganda
+    // foydalanuvchi ma'lumotini qayta so'ramasligi kerak.
+    oblId: { type: Number },
+    areaId: { type: Number },
+    districtId: { type: Number },
   },
   { timestamps: true },
 );

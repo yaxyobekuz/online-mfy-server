@@ -1,2 +1,43 @@
-03:28:20  [running] 40/569  +58 xato=28 otdi=43  beat=11s
-03:29:20  [running] 40/569  +62 xato=28 otdi=43  beat=13s
+03:43:48  [running] 57/569  +96 xato=36 otdi=56  beat=47s
+03:44:48  [running] 58/569  +98 xato=36 otdi=56  beat=37s
+03:45:48  [running] 59/569  +100 xato=36 otdi=56  beat=34s
+03:46:48  [running] 60/569  +103 xato=36 otdi=56  beat=13s
+03:47:48  [running] 61/569  +107 xato=36 otdi=56  beat=21s
+03:48:48  [paused] 62/569  +107 xato=37 otdi=56  beat=11s
+03:48:48  !!! to'xtagan (status=paused, beat=11s) — tiklanmoqda
+03:48:49  -> TIKLANDI: Davom ettirildi
+03:49:49  [running] 62/569  +109 xato=39 otdi=58  beat=21s
+03:50:49  [running] 62/569  +111 xato=40 otdi=58  beat=11s
+03:51:49  [running] 63/569  +112 xato=41 otdi=58  beat=15s
+03:52:49  [running] 63/569  +112 xato=45 otdi=58  beat=4s  (o'zgarmadi)
+03:53:49  [running] 68/569  +115 xato=47 otdi=59  beat=10s
+03:54:49  [running] 70/569  +119 xato=47 otdi=59  beat=8s
+03:55:49  [running] 72/569  +123 xato=47 otdi=60  beat=4s
+03:56:49  [running] 74/569  +128 xato=47 otdi=60  beat=4s
+03:57:49  [running] 75/569  +130 xato=47 otdi=60  beat=28s
+03:58:49  [running] 77/569  +133 xato=47 otdi=60  beat=9s
+03:59:49  [running] 78/569  +135 xato=48 otdi=60  beat=8s
+04:00:49  [running] 78/569  +137 xato=49 otdi=62  beat=6s
+04:01:49  [running] 80/569  +140 xato=49 otdi=63  beat=14s
+04:02:49  [running] 82/569  +142 xato=51 otdi=64  beat=5s
+04:03:49  [running] 83/569  +144 xato=52 otdi=64  beat=6s
+04:04:49  [paused] 84/569  +148 xato=52 otdi=65  beat=6s
+04:04:49  !!! to'xtagan (status=paused, beat=6s) — tiklanmoqda
+04:04:49  -> TIKLANDI: Davom ettirildi
+04:05:49  [running] 85/569  +151 xato=52 otdi=66  beat=17s
+04:06:49  [running] 86/569  +152 xato=53 otdi=68  beat=7s
+04:07:49  [running] 88/569  +155 xato=53 otdi=68  beat=10s
+04:08:49  [running] 90/569  +157 xato=53 otdi=69  beat=1s
+134 xato=48 otdi=60  beat=9s
+04:00:30  [running] 78/569  +136 xato=49 otdi=61  beat=6s
+04:01:30  [running] 79/569  +140 xato=49 otdi=62  beat=2s
+04:02:30  [running] 81/569  +141 xato=50 otdi=64  beat=7s
+04:03:30  [running] 83/569  +142 xato=52 otdi=64  beat=19s
+04:04:30  [running] 83/569  +147 xato=52 otdi=64  beat=10s
+04:05:30  [running] 85/569  +151 xato=52 otdi=65  beat=15s
+04:06:30  [running] 86/569  +151 xato=53 otdi=68  beat=3s
+04:07:30  [running] 87/569  +154 xato=53 otdi=68  beat=5s
+04:08:30  [running] 89/569  +156 xato=53 otdi=68  beat=12s
+04:09:30  [running] 92/569  +159 xato=53 otdi=69  beat=6s
+6 xato=53 otdi=68  beat=2s
+04:09:20  [running] 91/569  +159 xato=53 otdi=69  beat=7s

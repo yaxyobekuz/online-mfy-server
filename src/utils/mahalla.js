@@ -44,6 +44,38 @@ export const mahallaKey = (name) =>
     .replace(/E/g, "A")
     .replace(/Y/g, "I");
 
+/**
+ * Yumshoqroq kalit — faqat IKKI NOMNI TAQQOSLASH uchun.
+ *
+ * `mahallaKey` da unli tovushlar qisman birlashtirilgan (U -> O),
+ * lekin A va O alohida qolgan. Shuning uchun bir mahallaning ikki
+ * xil yozilishi turli kalit berishi mumkin:
+ *
+ *   "САРНАВУЛ"  -> SARNAVOL
+ *   "Сарновул"  -> SARNOVOL
+ *
+ * Bu ro'yxatni guruhlashda muammo emas (har ikkisi o'z guruhida
+ * qoladi), lekin "shu mahallami yoki boshqasimi?" degan savolga
+ * javob berishda xato beradi — odam o'z mahallasida turgani holda
+ * "ko'chib ketgan" deb ko'rsatiladi.
+ *
+ * Shuning uchun taqqoslash uchun A va O ham birlashtiriladi.
+ * Mahalliy 85 mahalla ro'yxatida bu qo'shimcha to'qnashuv
+ * keltirmasligi tekshirilgan.
+ *
+ * DIQQAT: guruhlash uchun ishlatilmaydi — u yerda `mahallaKey`
+ * qoladi, aks holda mavjud ma'lumot qayta hisoblanishi kerak
+ * bo'lardi.
+ */
+export const sameMahalla = (a, b) => {
+  const loose = (name) => mahallaKey(name).replace(/O/g, "A");
+
+  const left = loose(a);
+  const right = loose(b);
+
+  return Boolean(left) && left === right;
+};
+
 // "МФЙ", "MAHALLASI" kabi belgilar — nom shulardan oldin turadi.
 // Diqqat: \b faqat ASCII harflar bilan ishlaydi, kirill matnda hech
 // qachon mos kelmaydi. Shuning uchun chegara qo'lda tekshiriladi.

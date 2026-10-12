@@ -291,21 +291,26 @@ export const parseRegisteredPlace = (reason) => {
   if (!text) return null;
 
   // "<Viloyat> вилояти, <Tuman> тумани, <Mahalla> маҳалласи"
-  //
-  // Viloyat nomi oldida xizmat matni turadi ("pinfl: Ушбу фуқаро"),
-  // shuning uchun faqat OXIRGI so'zlarni olamiz: viloyat nomi bir
-  // yoki ikki so'zdan iborat bo'ladi ("Андижон", "Сирдарё") va
-  // kirill harflari bilan yoziladi.
   const match = text.match(
-    /([Ѐ-ӿʻ'`’]+(?:\s+[Ѐ-ӿʻ'`’]+)?)\s*вилояти\s*,\s*([^,]+?)\s*тумани\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
+    /([^,]+?)\s*вилояти\s*,\s*([^,]+?)\s*тумани\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
   );
 
   if (!match) return null;
 
   const clean = (value) => String(value).replace(/^[\s,.]+|[\s,.]+$/g, "");
 
+  // Viloyat nomi oldida xizmat matni turadi: "pinfl: Ушбу фуқаро".
+  // Uni olib tashlaymiz — nomning o'zi qoladi.
+  //
+  // Diqqat: `\b` kirill harflari bilan ishlamaydi (ASCII'ga
+  // bog'langan), shuning uchun so'z chegarasi o'rniga oxirgi
+  // "фуқаро" dan keyingi qismni olamiz.
+  const rawRegion = clean(match[1]);
+  const afterMarker = rawRegion.split(/фу[қк]аро/i).pop();
+  const region = clean(afterMarker ?? rawRegion).replace(/^.*?:\s*/, "");
+
   return {
-    region: clean(match[1]),
+    region: region || clean(match[1]),
     district: clean(match[2]),
     mahalla: clean(match[3]),
   };
@@ -320,7 +325,10 @@ export const REASON_LABELS = {
   hujjat_notogri: "Hujjat raqami platforma talabiga mos emas",
   allaqachon_mavjud: "Allaqachon ro'yxatda",
   vafot_etgan: "Vafot etgan",
-  hujjat_yaroqsiz: "Hujjati yaroqsiz / muddati o'tgan",
+  // Diqqat: odamning o'zi aktiv bo'lishi mumkin
+  // ("status_name = aktiv"), faqat HUJJATI yaroqsiz — ya'ni yangi
+  // pasport olgan, bazadagi ro'yxat esa eskisini ko'rsatyapti.
+  hujjat_yaroqsiz: "Hujjati yaroqsiz — yangi hujjat olingan bo'lishi mumkin",
   qidirib_bolmaydi: "JSHSHIR yo'q, hujjati guvohnoma emas — qidirib bo'lmaydi",
   pasport_topilmadi: "Pasport bo'yicha davlat bazasida topilmadi",
   hujjat_yoq: "JSHSHIR ham, hujjat ham yo'q",

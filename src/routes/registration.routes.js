@@ -11,6 +11,7 @@ import {
   getRegistrationMemberDetails,
   getRegistrationReport,
   retryRegistrationFailures,
+  exportRegistrationReport,
   deleteRegistrationRun,
 } from "../controllers/registration.controller.js";
 
@@ -30,6 +31,7 @@ router.get("/registration/runs/:runId/homes", getRegistrationHomes);
 router.get("/registration/runs/:runId/members", getRegistrationMembers);
 router.post("/registration/runs/:runId/control", controlRegistration);
 router.post("/registration/runs/:runId/retry", retryRegistrationFailures);
+router.get("/registration/runs/:runId/export", exportRegistrationReport);
 router.delete("/registration/runs/:runId", deleteRegistrationRun);
 
 export default router;

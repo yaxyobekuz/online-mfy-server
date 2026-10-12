@@ -13,6 +13,7 @@ import familyAddRoutes from "./src/routes/family-add.routes.js";
 import citizenRoutes from "./src/routes/citizen.routes.js";
 import mahallaRoutes from "./src/routes/mahalla.routes.js";
 import registrationRoutes from "./src/routes/registration.routes.js";
+import mahallaTokenRoutes from "./src/routes/mahalla-token.routes.js";
 import { authContext } from "./src/middlewares/auth-context.middleware.js";
 
 const app = express();
@@ -34,6 +35,7 @@ app.use("/api", familyAddRoutes);
 app.use("/api", citizenRoutes);
 app.use("/api", mahallaRoutes);
 app.use("/api", registrationRoutes);
+app.use("/api", mahallaTokenRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server ${PORT}-portda ishga tushdi`);
