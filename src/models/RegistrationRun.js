@@ -1,0 +1,94 @@
+import mongoose from "mongoose";
+
+const { Schema, model } = mongoose;
+
+/**
+ * MFY bo'yicha oila a'zolarini ro'yxatdan o'tkazish YURISHI (kampaniya).
+ *
+ * Bitta yurish = bitta mahalla (MFY) uchun boshidan oxirigacha olib
+ * boriladigan jarayon. Jarayon uzoq davom etadi (minglab xonadon,
+ * har biri uchun bir nechta tashqi so'rov), shuning uchun holat
+ * XOTIRADA EMAS, DB'da saqlanadi:
+ *   - sahifa yangilansa ham kuzatuv yo'qolmaydi;
+ *   - server qayta ishga tushsa, yurish aynan to'xtagan joyidan
+ *     davom etadi (xonadon va a'zo yozuvlari bosqichma-bosqich
+ *     belgilanadi, "qaytadan boshlash" shart emas).
+ *
+ * Boshqaruv: `control` maydoni orqali — ishchi (worker) har qadamda
+ * uni o'qiydi va "pause"/"stop" ko'rsatmasiga bo'ysunadi.
+ */
+const registrationRunSchema = new Schema(
+  {
+    // Mahalla (MFY) — umumiy fuqarolar bazasidagi manzildan
+    // hisoblangan kalit (utils/mahalla.js: mahallaKey).
+    mahallaKey: { type: String, required: true, index: true },
+    mahallaName: { type: String },
+
+    // --- Jarayon holati ---
+    // pending   — yaratildi, hali boshlanmagan
+    // preparing — MFY ko'chalari/xonadonlari yuklanmoqda
+    // running   — xonadonlar ketma-ket ishlanmoqda
+    // paused    — foydalanuvchi to'xtatib turdi (davom ettirish mumkin)
+    // done      — barcha xonadon ishlandi
+    // stopped   — foydalanuvchi butunlay to'xtatdi
+    // error     — kutilmagan xatolik (sabab `error` maydonida)
+    status: {
+      type: String,
+      enum: ["pending", "preparing", "running", "paused", "done", "stopped", "error"],
+      default: "pending",
+      index: true,
+    },
+
+    // Ishchiga ko'rsatma. Ishchi har xonadondan oldin o'qiydi.
+    //   run   — davom et
+    //   pause — joriy xonadonni tugatib, to'xtab tur
+    //   stop  — joriy xonadonni tugatib, yurishni yop
+    control: {
+      type: String,
+      enum: ["run", "pause", "stop"],
+      default: "run",
+    },
+
+    // Qaysi bosqichda ekani (clientda bir qatorli izoh sifatida
+    // ko'rsatiladi): "Ko'chalar yuklanmoqda", "12/340 — xonadon ..."
+    stage: { type: String },
+
+    // --- Hisoblagichlar ---
+    // Barchasi DB'da yurishning o'zida saqlanadi: sahifa qayta
+    // ochilganda ham son to'g'ri ko'rinishi uchun.
+    homesTotal: { type: Number, default: 0 },
+    homesDone: { type: Number, default: 0 },
+    homesFailed: { type: Number, default: 0 },
+
+    // Nomzodlar — fuqarolar bazasidan topilgan, qo'shilishi kerak
+    // bo'lgan odamlar.
+    membersTotal: { type: Number, default: 0 },
+    membersAdded: { type: Number, default: 0 },
+    membersFailed: { type: Number, default: 0 },
+    membersSkipped: { type: Number, default: 0 },
+
+    // Rate-limit tufayli kutilayotgan bo'lsa — shu vaqtgacha.
+    waitingUntil: { type: Number, default: null },
+
+    // Oxirgi marta jonli belgi qo'yilgan vaqt. Server kutilmaganda
+    // o'chsa, "running" holatida qotib qolgan yurishni shu orqali
+    // aniqlaymiz (davom ettirish taklif qilinadi).
+    heartbeatAt: { type: Date },
+
+    error: { type: String },
+
+    startedAt: { type: Date },
+    finishedAt: { type: Date },
+
+    // Yurishni boshlagan foydalanuvchi. Tashqi API so'rovlari shu
+    // foydalanuvchining hududi (obl/area/district) bo'yicha ketadi.
+    userUid: { type: String, required: true, index: true },
+  },
+  { timestamps: true },
+);
+
+// Bitta mahalla uchun bir vaqtda bitta faol yurish bo'lishi kerak —
+// ro'yxatda eng yangisi birinchi chiqadi.
+registrationRunSchema.index({ userUid: 1, createdAt: -1 });
+
+export default model("RegistrationRun", registrationRunSchema);
