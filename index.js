@@ -12,6 +12,7 @@ import rawHomeRoutes from "./src/routes/raw-home.routes.js";
 import familyAddRoutes from "./src/routes/family-add.routes.js";
 import citizenRoutes from "./src/routes/citizen.routes.js";
 import mahallaRoutes from "./src/routes/mahalla.routes.js";
+import registrationRoutes from "./src/routes/registration.routes.js";
 import { authContext } from "./src/middlewares/auth-context.middleware.js";
 
 const app = express();
@@ -32,6 +33,7 @@ app.use("/api", rawHomeRoutes);
 app.use("/api", familyAddRoutes);
 app.use("/api", citizenRoutes);
 app.use("/api", mahallaRoutes);
+app.use("/api", registrationRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server ${PORT}-portda ishga tushdi`);
