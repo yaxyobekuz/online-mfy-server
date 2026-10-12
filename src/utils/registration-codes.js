@@ -291,8 +291,13 @@ export const parseRegisteredPlace = (reason) => {
   if (!text) return null;
 
   // "<Viloyat> вилояти, <Tuman> тумани, <Mahalla> маҳалласи"
+  //
+  // Viloyat nomi oldida xizmat matni turadi ("pinfl: Ушбу фуқаро"),
+  // shuning uchun faqat OXIRGI so'zlarni olamiz: viloyat nomi bir
+  // yoki ikki so'zdan iborat bo'ladi ("Андижон", "Сирдарё") va
+  // kirill harflari bilan yoziladi.
   const match = text.match(
-    /([^,]+?)\s*вилояти\s*,\s*([^,]+?)\s*тумани\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
+    /([Ѐ-ӿʻ'`’]+(?:\s+[Ѐ-ӿʻ'`’]+)?)\s*вилояти\s*,\s*([^,]+?)\s*тумани\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
   );
 
   if (!match) return null;
