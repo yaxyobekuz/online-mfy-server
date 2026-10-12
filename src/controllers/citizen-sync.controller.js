@@ -50,7 +50,29 @@ const logWait = (progressKey, label) => (until) => {
 const isTransientError = (gcpData) =>
   /Internal Server Error/i.test(String(gcpData?.message ?? ""));
 
+// Shaxs vafot etgan — bu holat o'zgarmaydi, qayta so'rash befoyda.
+const isDeceased = (gcpData) =>
+  /status_name\s*=\s*vafot etgan/i.test(String(gcpData?.message ?? ""));
+
+// Tarmoq uzilishi (DNS, timeout, ulanish). Bu ma'lumotning emas,
+// aloqaning muammosi — bir necha soniyadan keyin qayta urinib
+// ko'rish kerak, aks holda uzilish paytidagi o'nlab yozuv bekorga
+// "xato" bo'lib qoladi.
+const NETWORK_ERRORS = new Set([
+  "ENOTFOUND", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED",
+  "EAI_AGAIN", "ECONNABORTED", "EHOSTUNREACH", "ENETUNREACH",
+]);
+
+const isNetworkError = (err) =>
+  !err?.response && (NETWORK_ERRORS.has(err?.code) || err?.code === "ERR_NETWORK");
+
 const GCP_RETRIES = 3;
+
+// Vaqtinchalik nosozlikdan keyin darhol qayta so'rasak, ko'pincha
+// yana o'sha javob keladi. Qisqa tanaffus natijani sezilarli
+// yaxshilaydi.
+const RETRY_PAUSE_MS = 1200;
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // JSHSHIR + tug'ilgan sana bo'yicha davlat pasport bazasidan
 // (GCP) so'nggi ma'lumotni oladi.
@@ -76,6 +98,8 @@ const fetchGcpData = async (pinfl, birthDate, progressKey) => {
     // Javob aniq bo'lsa (muvaffaqiyat yoki tushunarli sabab) —
     // qayta so'rashning hojati yo'q.
     if (last?.code === 0 || !isTransientError(last)) return last;
+
+    if (attempt < GCP_RETRIES) await pause(RETRY_PAUSE_MS);
   }
 
   return last;
@@ -171,14 +195,31 @@ const mapBirthCertUpdate = (response) => {
   return update;
 };
 
+// Hujjat seriyasi/raqamini har safar `document` dan qayta hisoblaymiz.
+// DB'dagi tayyor documentSeries/documentNumber eski import paytidagi
+// (kamroq formatni biladigan) mantiq bilan to'ldirilgan bo'lishi
+// mumkin — masalan "T45759099" uchun seriya null bo'lib qolgan.
+const documentParts = (citizen) => {
+  const parsed = splitDocument(citizen.document);
+  if (parsed.series) return parsed;
+
+  // `document` bo'sh bo'lsa, saqlangan maydonlarga qaytamiz.
+  return {
+    series: citizen.documentSeries ?? null,
+    number: citizen.documentNumber ?? null,
+  };
+};
+
 // JSHSHIR yo'q va hujjati aynan TUG'ILGANLIK GUVOHNOMASI bo'lsa —
 // FHDYO bazasidan qidiramiz. Pasport seriyasini (AA, AB, AE...)
 // yuborish mantiqsiz: FHDYO faqat guvohnomalarni biladi va har
 // safar "Ma'lumot topilmadi" qaytaradi.
-const needsBirthCert = (citizen) =>
-  !citizen.pinfl &&
-  citizen.documentNumber &&
-  isBirthCertificate(citizen.documentSeries);
+const needsBirthCert = (citizen) => {
+  if (citizen.pinfl) return false;
+
+  const { series, number } = documentParts(citizen);
+  return Boolean(number) && isBirthCertificate(series);
+};
 
 /**
  * Berilgan yozuvlarni ketma-ket yangilaydi. Bitta yozuv xato bersa
@@ -208,9 +249,10 @@ const syncCitizens = async (user, citizens) => {
         // 1-bosqich: JSHSHIR yo'q bo'lsa, guvohnoma bazasidan
         // qidiramiz — u JSHSHIR va ota-ona ma'lumotini qaytaradi.
         if (needsBirthCert(citizen)) {
+          const { series, number } = documentParts(citizen);
           const certResponse = await fetchBirthCertData(
-            citizen.documentSeries,
-            citizen.documentNumber,
+            series,
+            number,
             isoBirthDate,
             key,
           );
@@ -240,13 +282,29 @@ const syncCitizens = async (user, citizens) => {
           // Pasporti bor, lekin JSHSHIR yo'q: GCP faqat JSHSHIR
           // bo'yicha qidiradi, FHDYO esa faqat guvohnomani biladi —
           // ya'ni bu yozuvni hech qaysi baza orqali topib bo'lmaydi.
-          if (citizen.document) {
-            throw new Error(
-              `JSHSHIR yo'q, hujjati esa guvohnoma emas (${citizen.document}) — qidirib bo'lmaydi`,
-            );
-          }
+          // Excel yangilanmaguncha javob o'zgarmaydi, shuning uchun
+          // belgilab qo'yamiz va boshqa so'ramaymiz.
+          const reason = citizen.document
+            ? `JSHSHIR yo'q, hujjati esa guvohnoma emas (${citizen.document}) — qidirib bo'lmaydi`
+            : "JSHSHIR ham, tug'ilganlik guvohnomasi ham yo'q";
 
-          throw new Error("JSHSHIR ham, tug'ilganlik guvohnomasi ham yo'q");
+          await Citizen.updateOne(
+            { _id: citizen._id },
+            { $set: { documentExpired: true, documentExpiredAt: new Date() } },
+          );
+
+          tickSync(key, {
+            failed: true,
+            error: {
+              recordId: String(citizen._id),
+              fullName: citizen.fullName,
+              reason,
+            },
+          });
+          console.log(
+            `[Fuqarolar sync] ${position}/${total} — QIDIRIB BO'LMAYDI (${citizen.fullName}) ${Date.now() - startedAt}ms`,
+          );
+          continue;
         }
 
         // 2-bosqich: JSHSHIR ma'lum — pasport bazasidan so'raymiz.
@@ -262,7 +320,9 @@ const syncCitizens = async (user, citizens) => {
             continue;
           }
 
-          if (isExpiredDocument(gcpData)) {
+          // Vafot etgan shaxs — javob hech qachon o'zgarmaydi.
+          // Qayta so'ramaslik uchun "eskirgan" deb belgilaymiz.
+          if (isDeceased(gcpData) || isExpiredDocument(gcpData)) {
             await Citizen.updateOne(
               { _id: citizen._id },
               {
@@ -294,6 +354,18 @@ const syncCitizens = async (user, citizens) => {
           `[Fuqarolar sync] ${position}/${total} — OK${viaBirthCert ? " guvohnoma→pasport" : ""} (${citizen.fullName ?? pinfl}) ${Date.now() - startedAt}ms`,
         );
       } catch (err) {
+        // Tarmoq uzilgan bo'lsa — yozuvning aybi yo'q, aloqa
+        // tiklanishini kutamiz. Uzilish bir necha soniya davom etsa,
+        // aks holda o'nlab yozuv bekorga "xato" bo'lib qolardi.
+        if (isNetworkError(err)) {
+          console.log(
+            `[Fuqarolar sync] ${position}/${total} — tarmoq uzildi (${err.code}), 15 soniya kutilmoqda...`,
+          );
+          setSyncWaiting(key, Date.now() + 15000);
+          await pause(15000);
+          setSyncWaiting(key, null);
+        }
+
         const reason =
           err.response?.data?.message || err.message || "Noma'lum xatolik";
 
