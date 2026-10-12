@@ -119,6 +119,10 @@ export const withRateLimit = async (
 
       if (state) {
         state.successStreak = 0;
+        // Oxirgi marta limitga qachon urilgani — jonli kuzatuvda
+        // "limitga yetdi" belgisini ko'rsatish uchun.
+        state.lastLimitAt = Date.now();
+        state.waitingUntil = Date.now() + waitMs;
 
         // Server aytgan kutish vaqti — joriy oynaning qolgan qismi,
         // ya'ni oyna uzunligi shundan katta emas. Shu oyna ichiga
@@ -149,8 +153,59 @@ export const withRateLimit = async (
 
       onWait?.(Date.now() + waitMs);
       await sleep(waitMs);
+      if (state) state.waitingUntil = null;
       onWait?.(null);
       // Qayta uramiz — urinishlar soniga chegara yo'q.
     }
   }
+};
+
+// ---------------------------------------------------------------
+// Holatni tashqariga ko'rsatish
+// ---------------------------------------------------------------
+
+/**
+ * Moslashuvchan throttle holati — jonli kuzatuv uchun.
+ *
+ * Ichki `adaptiveStateByKey` xususiy, lekin uning ko'rsatkichlari
+ * foydalanuvchiga juda foydali: tizim hozir qanday tezlikda
+ * ishlayotgani, limitga yetgan-yetmagani va qachon bo'shashi.
+ * Shusiz jarayon "qotib qolgandek" ko'rinadi.
+ *
+ * Qaytaradi: { delayMs, perMinute, successStreak, inWindow,
+ *              waitingUntil, lastLimitAt }
+ */
+export const getRateLimitState = (key) => {
+  const state = adaptiveStateByKey.get(key);
+  if (!state) return null;
+
+  const now = Date.now();
+
+  // Oxirgi daqiqada nechta so'rov o'tgan — haqiqiy o'tkazuvchanlik.
+  const lastMinute = state.successTimestamps.filter(
+    (ts) => ts >= now - 60000,
+  ).length;
+
+  return {
+    // Hozirgi tanaffus: kichik bo'lsa tez, katta bo'lsa limitga
+    // yaqin ishlayapti.
+    delayMs: state.delayMs,
+    // Shu tanaffus bilan nazariy tezlik (so'rov/daqiqa).
+    perMinute: state.delayMs > 0 ? Math.round(60000 / state.delayMs) : null,
+    // Haqiqiy o'tkazuvchanlik (oxirgi daqiqada).
+    lastMinute,
+    successStreak: state.successStreak,
+    waitingUntil: state.waitingUntil ?? null,
+    lastLimitAt: state.lastLimitAt ?? null,
+  };
+};
+
+// Barcha oqimlar holati — bir nechta MFY parallel ishlaganda
+// har birini alohida ko'rish uchun.
+export const getAllRateLimitStates = () => {
+  const result = {};
+  for (const key of adaptiveStateByKey.keys()) {
+    result[key] = getRateLimitState(key);
+  }
+  return result;
 };

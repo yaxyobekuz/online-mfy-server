@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { streamRegistrationState } from "../controllers/registration-stream.controller.js";
 import {
   getRegistrationMahallas,
   getRegistrationRuns,
@@ -21,6 +22,8 @@ const router = Router();
 router.get("/registration/mahallas", getRegistrationMahallas);
 router.get("/registration/report", getRegistrationReport);
 router.get("/registration/runs", getRegistrationRuns);
+// Jonli uzatish (SSE) — holat va API limiti real vaqtda.
+router.get("/registration/stream", streamRegistrationState);
 router.post("/registration/runs", startRegistration);
 
 router.get("/registration/members/:memberId", getRegistrationMemberDetails);

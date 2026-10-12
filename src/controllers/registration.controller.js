@@ -9,6 +9,7 @@ import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser, getRequestToken } from "../utils/request-context.js";
 import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
 import { getRunLogs } from "../utils/registration-log.js";
+import { getRateLimitState } from "../utils/rate-limit.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
 import {
   runRegistration,
@@ -20,6 +21,24 @@ const PAGE_SIZE = 50;
 const parsePage = (value) => {
   const page = Number.parseInt(value, 10);
   return Number.isFinite(page) && page > 0 ? page : 1;
+};
+
+/**
+ * Joriy foydalanuvchi KO'RA OLADIGAN barcha MFY egalari.
+ *
+ * Boshqa MFY yurishlari o'sha token EGASI nomidan yaratiladi
+ * (`userUid` — token egasiniki), shuning uchun faqat `user.uid`
+ * bo'yicha filtrlash boshqa mahallalarni butunlay yashirib
+ * qo'yardi: ro'yxat bo'sh chiqar, "Boshlash" esa mavjud yurishni
+ * topa olmay xato berardi.
+ *
+ * Qo'shilgan tokenlar umumiy ro'yxat — kim qo'shgan bo'lsa ham
+ * hamma ko'radi (bir mahallaga bir nechta xodim mas'ul bo'lishi
+ * mumkin).
+ */
+const visibleUids = async (user) => {
+  const tokens = await MahallaToken.find({}, "uid").lean();
+  return [...new Set([user.uid, ...tokens.map((t) => t.uid)])];
 };
 
 const requireUser = (res) => {
@@ -130,8 +149,8 @@ export const getRegistrationMahallas = async (req, res) => {
     // Qaysi kadastr qaysi TOKEN ga tegishli ekanini ham bilamiz:
     // bir nechta MFY tokeni qo'shilgan bo'lsa, har mahalla o'z
     // tokeni bilan boshlanishi kerak.
-    const tokenOwners = await MahallaToken.find({}, "uid").lean();
-    const ownerUids = [user.uid, ...tokenOwners.map((t) => t.uid)];
+    const ownerUids = await visibleUids(user);
+    const uids = ownerUids;
 
     const cadasterOwner = new Map();
 
@@ -149,8 +168,8 @@ export const getRegistrationMahallas = async (req, res) => {
     const ownCadasters = new Set(cadasterOwner.keys());
 
     // Har mahalla uchun eng yangi yurish — ro'yxatda holat ko'rinib
-    // turishi uchun.
-    const runs = await RegistrationRun.find({ userUid: user.uid })
+    // turishi uchun. Boshqa MFY yurishlari ham ko'rinadi.
+    const runs = await RegistrationRun.find({ userUid: { $in: uids } })
       .sort({ createdAt: -1 })
       .lean();
 
@@ -239,7 +258,10 @@ export const getRegistrationRuns = async (req, res) => {
   if (!user) return;
 
   try {
-    const runs = await RegistrationRun.find({ userUid: user.uid })
+    // Barcha ko'rinadigan MFY yurishlari — faqat o'zimizniki emas.
+    const uids = await visibleUids(user);
+
+    const runs = await RegistrationRun.find({ userUid: { $in: uids } })
       .sort({ createdAt: -1 })
       .limit(100)
       .lean();
@@ -307,6 +329,8 @@ export const startRegistration = async (req, res) => {
     // PARALLEL ishlay oladi. Bitta mahallani esa ikki marta
     // boshlash mumkin emas — bir xonadon ikki marta ishlanib,
     // platformaga dublikat so'rov ketardi.
+    // Yurish token EGASI nomidan yaratiladi, shuning uchun qidiruv
+    // ham o'sha bo'yicha ketadi (joriy seans emas).
     const running = await RegistrationRun.findOne({
       userUid: user.uid,
       mahallaKey: key,
@@ -323,10 +347,20 @@ export const startRegistration = async (req, res) => {
     // Shu mahalla uchun tugallanmagan yurish bo'lsa — yangisini
     // yaratmaymiz, o'shani davom ettiramiz. Aks holda bir xonadon
     // ikki marta ishlanib, platformada dublikat urinishlar bo'ladi.
+    // "stopped" ham qidiruvga kiradi: foydalanuvchi to'xtatgan
+    // yurishda navbat va natijalar saqlanib qoladi. Aks holda
+    // "Boshlash" bosilganda yangi bo'sh yurish yaratilib, oldingi
+    // ish yo'qolgandek ko'rinardi (va xonadonlar qaytadan
+    // ishlanardi).
+    //
+    // "done" va "error" kirmaydi: birinchisi tugagan, ikkinchisida
+    // sabab aniqlanishi kerak.
     const resumable = await RegistrationRun.findOne({
       userUid: user.uid,
       mahallaKey: key,
-      status: { $in: ["pending", "preparing", "running", "paused"] },
+      status: {
+        $in: ["pending", "preparing", "running", "paused", "stopped"],
+      },
     })
       .select("+token")
       .sort({ createdAt: -1 });
@@ -420,7 +454,7 @@ export const controlRegistration = async (req, res) => {
     // eski token zaxira sifatida kerak bo'ladi.
     const run = await RegistrationRun.findOne({
       _id: runId,
-      userUid: user.uid,
+      userUid: { $in: await visibleUids(user) },
     }).select("+token");
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
@@ -484,7 +518,7 @@ export const getRegistrationStatus = async (req, res) => {
   try {
     const run = await RegistrationRun.findOne({
       _id: runId,
-      userUid: user.uid,
+      userUid: { $in: await visibleUids(user) },
     }).lean();
 
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
@@ -507,7 +541,12 @@ export const getRegistrationStatus = async (req, res) => {
     ]);
 
     return res.status(200).json({
-      run: describeRun(run),
+      run: {
+        ...describeRun(run),
+        // Tashqi API limiti holati — jarayon kutayotganini
+        // ko'rsatish uchun. Kalit ishchidagi bilan bir xil.
+        rateLimit: getRateLimitState(`registration:${run.userUid}`),
+      },
       currentHome: currentHome ?? null,
       recentMembers,
       logs: getRunLogs(run._id, since),
@@ -532,7 +571,8 @@ export const getRegistrationHomes = async (req, res) => {
 
   try {
     const page = parsePage(req.query.page);
-    const filter = { runId, userUid: user.uid };
+    // Yurish boshqa MFY tokeni nomidan ketgan bo'lishi mumkin.
+    const filter = { runId, userUid: { $in: await visibleUids(user) } };
 
     if (req.query.status) filter.status = String(req.query.status);
 
@@ -585,7 +625,7 @@ export const getRegistrationHomeDetails = async (req, res) => {
   try {
     const home = await RegistrationHome.findOne({
       _id: homeRowId,
-      userUid: user.uid,
+      userUid: { $in: await visibleUids(user) },
     }).lean();
 
     if (!home) return res.status(404).json({ message: "Xonadon topilmadi" });
@@ -616,7 +656,8 @@ export const getRegistrationMembers = async (req, res) => {
 
   try {
     const page = parsePage(req.query.page);
-    const filter = { runId, userUid: user.uid };
+    // Yurish boshqa MFY tokeni nomidan ketgan bo'lishi mumkin.
+    const filter = { runId, userUid: { $in: await visibleUids(user) } };
 
     if (req.query.status) filter.status = String(req.query.status);
     if (req.query.reasonCode) filter.reasonCode = String(req.query.reasonCode);
@@ -672,7 +713,7 @@ export const getRegistrationMemberDetails = async (req, res) => {
   try {
     const member = await RegistrationMember.findOne({
       _id: memberId,
-      userUid: user.uid,
+      userUid: { $in: await visibleUids(user) },
     }).lean();
 
     if (!member) return res.status(404).json({ message: "Yozuv topilmadi" });
@@ -695,8 +736,11 @@ export const getRegistrationReport = async (req, res) => {
 
   try {
     const runId = req.query.runId;
-    const memberFilter = { userUid: user.uid };
-    const homeFilter = { userUid: user.uid };
+    // Hisobot barcha ko'rinadigan MFY lar bo'yicha — "Umumiy"
+    // tanlanganda hammasi qo'shilib hisoblanadi.
+    const uids = await visibleUids(user);
+    const memberFilter = { userUid: { $in: uids } };
+    const homeFilter = { userUid: { $in: uids } };
 
     if (runId) {
       if (!mongoose.isValidObjectId(runId)) {
@@ -720,7 +764,7 @@ export const getRegistrationReport = async (req, res) => {
       elsewhere,
     ] = await Promise.all([
       runId
-        ? RegistrationRun.findOne({ _id: runId, userUid: user.uid }).lean()
+        ? RegistrationRun.findOne({ _id: runId, userUid: { $in: uids } }).lean()
         : null,
 
       // Odamlar holati bo'yicha.
@@ -944,7 +988,10 @@ export const retryRegistrationFailures = async (req, res) => {
   }
 
   try {
-    const run = await RegistrationRun.findOne({ _id: runId, userUid: user.uid });
+    const run = await RegistrationRun.findOne({
+      _id: runId,
+      userUid: { $in: await visibleUids(user) },
+    });
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
     if (isRunActive(run._id)) {
@@ -1014,7 +1061,10 @@ export const deleteRegistrationRun = async (req, res) => {
   }
 
   try {
-    const run = await RegistrationRun.findOne({ _id: runId, userUid: user.uid });
+    const run = await RegistrationRun.findOne({
+      _id: runId,
+      userUid: { $in: await visibleUids(user) },
+    });
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
     if (isRunActive(run._id)) {
@@ -1057,7 +1107,7 @@ export const exportRegistrationReport = async (req, res) => {
   try {
     const run = await RegistrationRun.findOne({
       _id: runId,
-      userUid: user.uid,
+      userUid: { $in: await visibleUids(user) },
     }).lean();
 
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
