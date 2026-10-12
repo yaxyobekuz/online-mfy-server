@@ -78,6 +78,17 @@ const registrationMemberSchema = new Schema(
     // Nega qo'shilmadi — odam tilida, hisobotda shu ko'rinadi.
     reason: { type: String },
 
+    // Platforma "bu fuqaro boshqa xonadonda ro'yxatda" deb rad
+    // etganda, xabar ichida O'SHA joyning manzili bo'ladi:
+    //   "Ушбу фуқаро Фарғона вилояти, Фарғона тумани, Оқбилол
+    //    маҳалласи ... хонадони ... да мавжуд"
+    // Bu mahalla xodimi uchun qimmatli ma'lumot — odam ko'chib
+    // ketganini bildiradi. Shuning uchun ajratib saqlanadi.
+    registeredRegion: { type: String },
+    registeredMahalla: { type: String },
+    // O'z mahallamizdami yoki boshqa joydami.
+    movedAway: { type: Boolean },
+
     // Xatolarni guruhlash uchun qisqa belgi ("pinfl_yoq",
     // "malumot_mos_emas", "vafot_etgan", ...). Hisobotda sabablar
     // shu bo'yicha sanaladi — erkin matnni guruhlab bo'lmaydi.

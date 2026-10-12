@@ -273,6 +273,39 @@ export const reasonCodeOf = (reason) => {
   return "boshqa";
 };
 
+/**
+ * Platforma "bu fuqaro boshqa xonadonda ro'yxatda" deb rad etganda,
+ * xabar ichida o'sha joyning manzili bo'ladi:
+ *
+ *   "Ушбу фуқаро Фарғона вилояти, Фарғона тумани, Оқбилол маҳалласи
+ *    AMINJONOV DILSHOD ... хонадони ... да мавжуд"
+ *
+ * Shu matndan viloyat va mahalla nomini ajratadi. Mahalla xodimi
+ * uchun bu qimmatli ma'lumot: odam ko'chib ketganini va qayerda
+ * ro'yxatda turganini bildiradi.
+ *
+ * Qaytaradi: { region, mahalla } yoki null.
+ */
+export const parseRegisteredPlace = (reason) => {
+  const text = String(reason ?? "");
+  if (!text) return null;
+
+  // "<Viloyat> вилояти, <Tuman> тумани, <Mahalla> маҳалласи"
+  const match = text.match(
+    /([^,]+?)\s*вилояти\s*,\s*([^,]+?)\s*тумани\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
+  );
+
+  if (!match) return null;
+
+  const clean = (value) => String(value).replace(/^[\s,.]+|[\s,.]+$/g, "");
+
+  return {
+    region: clean(match[1]),
+    district: clean(match[2]),
+    mahalla: clean(match[3]),
+  };
+};
+
 // Hisobotda sabab kodini odam tilida ko'rsatish uchun.
 export const REASON_LABELS = {
   pinfl_yoq: "JSHSHIR yo'q",
