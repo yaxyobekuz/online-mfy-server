@@ -778,6 +778,7 @@ export const getRegistrationReport = async (req, res) => {
       byStudyLevel,
       timing,
       needDocument,
+      uniquePeople,
       elsewhere,
     ] = await Promise.all([
       runId
@@ -872,6 +873,18 @@ export const getRegistrationReport = async (req, res) => {
         { $limit: 200 },
       ]),
 
+      // Nechta UNIKAL odam bilan urinilgan.
+      //
+      // `members.total` — urinishlar soni, bu esa odamlar soni:
+      // bir odam qayta urinilgan bo'lishi mumkin (xonadon qayta
+      // ishlansa yoki vaqtinchalik xato bo'lsa). Mahalla uchun
+      // "nechta odam ko'rib chiqildi" degan savolga javob shu.
+      RegistrationMember.aggregate([
+        { $match: memberFilter },
+        { $group: { _id: { $ifNull: ["$pinfl", "$fullName"] } } },
+        { $count: "n" },
+      ]),
+
       // Boshqa joyda ro'yxatda turganlar — ya'ni ko'chib ketganlar.
       // Mahalla uchun bu shunchaki "xato" emas, amaliy ma'lumot:
       // ro'yxatni yangilash kerakligini bildiradi.
@@ -913,7 +926,11 @@ export const getRegistrationReport = async (req, res) => {
       run: describeRun(run),
 
       members: {
+        // Urinishlar soni (bir odam bir necha marta urinilgan
+        // bo'lishi mumkin).
         total: Object.values(members).reduce((sum, n) => sum + n, 0),
+        // Nechta unikal odam ko'rib chiqildi.
+        people: uniquePeople[0]?.n ?? 0,
         added: members.added ?? 0,
         failed: members.failed ?? 0,
         skipped: members.skipped ?? 0,
@@ -1097,6 +1114,82 @@ export const deleteRegistrationRun = async (req, res) => {
     await RegistrationRun.deleteOne({ _id: run._id });
 
     return res.status(200).json({ message: "O'chirildi" });
+  } catch {
+    return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+/**
+ * So'rov vaqtlari — chart uchun.
+ *
+ * Har urinishga ketgan vaqt (`durationMs`) vaqt tartibida
+ * qaytariladi. Mahalla xodimi shundan tezlik qachon o'sib, qachon
+ * tushganini ko'radi: baland cho'qqilar — tashqi API limitidagi
+ * kutish, past qism — tez ishlagan payt.
+ *
+ * Nuqtalar soni cheklanadi: yurishda minglab urinish bo'lishi
+ * mumkin, chart esa shuncha nuqtani ko'rsata olmaydi va foydasi
+ * ham yo'q.
+ */
+export const getRegistrationTimings = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  const { runId } = req.params;
+  if (!mongoose.isValidObjectId(runId)) {
+    return res.status(400).json({ message: "Yurish ID'si noto'g'ri" });
+  }
+
+  try {
+    const limit = Math.min(
+      Math.max(Number.parseInt(req.query.limit, 10) || 200, 20),
+      500,
+    );
+
+    const uids = await visibleUids(user);
+
+    const run = await RegistrationRun.findOne({
+      _id: runId,
+      userUid: { $in: uids },
+    }).lean();
+
+    if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
+
+    // Eng oxirgi N ta urinish (chart o'ngdan chapga to'ladi).
+    const rows = await RegistrationMember.find(
+      { runId, durationMs: { $gt: 0 } },
+      "durationMs status createdAt fullName verifiedFullName reasonCode",
+    )
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    // Vaqt tartibiga qaytaramiz.
+    rows.reverse();
+
+    const points = rows.map((row) => ({
+      at: new Date(row.createdAt).getTime(),
+      // Sekundda — chart shu birlikda ko'rsatiladi.
+      seconds: Number((row.durationMs / 1000).toFixed(2)),
+      status: row.status,
+      name: row.verifiedFullName ?? row.fullName ?? null,
+      reasonCode: row.reasonCode ?? null,
+    }));
+
+    const seconds = points.map((p) => p.seconds);
+    const sum = seconds.reduce((acc, n) => acc + n, 0);
+
+    return res.status(200).json({
+      runId: String(run._id),
+      mahallaName: run.mahallaName,
+      points,
+      stats: {
+        count: points.length,
+        avg: points.length ? Number((sum / points.length).toFixed(2)) : 0,
+        min: points.length ? Math.min(...seconds) : 0,
+        max: points.length ? Math.max(...seconds) : 0,
+      },
+    });
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
   }

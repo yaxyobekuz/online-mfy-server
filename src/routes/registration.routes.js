@@ -13,6 +13,7 @@ import {
   getRegistrationReport,
   retryRegistrationFailures,
   exportRegistrationReport,
+  getRegistrationTimings,
   deleteRegistrationRun,
 } from "../controllers/registration.controller.js";
 
@@ -35,6 +36,7 @@ router.get("/registration/runs/:runId/members", getRegistrationMembers);
 router.post("/registration/runs/:runId/control", controlRegistration);
 router.post("/registration/runs/:runId/retry", retryRegistrationFailures);
 router.get("/registration/runs/:runId/export", exportRegistrationReport);
+router.get("/registration/runs/:runId/timings", getRegistrationTimings);
 router.delete("/registration/runs/:runId", deleteRegistrationRun);
 
 export default router;
