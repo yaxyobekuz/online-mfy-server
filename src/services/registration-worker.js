@@ -63,6 +63,18 @@ import { pushRunLog } from "../utils/registration-log.js";
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Shu server nusxasining belgisi. Bitta bazaga bir nechta server
+// ulanganda qaysi yurishni kim olib borayotganini ajratish uchun.
+// Har ishga tushishda yangi bo'ladi — eski (o'chib qolgan) nusxa
+// egaligi `OWNER_TIMEOUT_MS` dan keyin bo'shaydi.
+const SERVER_ID = `${process.env.SERVER_NAME ?? "server"}-${process.pid}-${Date.now().toString(36)}`;
+const SERVER_NAME = process.env.SERVER_NAME ?? "asosiy";
+
+// Egasi shu vaqt davomida belgi qo'ymasa, yurish bo'sh deb
+// hisoblanadi. Bitta odam ~20 soniya, rate-limit kutishi ~56
+// soniya — shuning uchun chegara ulardan sezilarli katta.
+const OWNER_TIMEOUT_MS = 300000;
+
 const GCP_RETRIES = 3;
 const RETRY_PAUSE_MS = 1200;
 const NETWORK_WAIT_MS = 15000;
@@ -94,7 +106,36 @@ const isDeceased = (gcpData) =>
 // ishga tushib qolmasligi uchun.
 const activeRuns = new Set();
 
+// Shu serverda ishlayaptimi.
 export const isRunActive = (runId) => activeRuns.has(String(runId));
+
+/**
+ * Yurish umuman faolmi — SHU serverda yoki BOSHQASIDA.
+ *
+ * Bir nechta server bitta bazaga ulangan bo'lsa, `activeRuns`
+ * yetarli emas: boshqa serverdagi yurish "to'xtagan" ko'rinardi va
+ * foydalanuvchi uni qayta boshlab yuborishi mumkin edi.
+ *
+ * Shuning uchun yurishning o'z belgisiga qaraladi: egasi bor va
+ * yaqinda belgi qo'ygan bo'lsa — faol.
+ */
+export const isRunActiveAnywhere = (run) => {
+  if (!run) return false;
+  if (activeRuns.has(String(run._id))) return true;
+
+  if (!run.ownerId || !run.heartbeatAt) return false;
+
+  return Date.now() - new Date(run.heartbeatAt) < OWNER_TIMEOUT_MS;
+};
+
+// Yurishni qaysi server olib boryapti (o'zimizmi yoki boshqasi).
+export const runOwner = (run) => {
+  if (!run?.ownerId) return null;
+  return {
+    name: run.ownerName ?? "boshqa server",
+    isSelf: run.ownerId === SERVER_ID,
+  };
+};
 
 /**
  * Tashqi API xatosidan eng foydali matnni chiqaradi. Axios'ning o'z
@@ -1456,6 +1497,41 @@ export const runRegistration = async (user, runDoc, token) => {
   const runId = String(runDoc._id);
 
   if (activeRuns.has(runId)) return;
+
+  // --- Egalik olish (bir nechta server uchun) ---
+  //
+  // Bitta bazaga bir nechta server ulanishi mumkin. `activeRuns`
+  // xotirada bo'lgani uchun ikkinchi server birinchisining
+  // ishlayotganini ko'rmaydi — bir xonadonga ikki marta so'rov
+  // ketardi.
+  //
+  // Shuning uchun egalik DB'da ATOMIK tarzda olinadi: shart faqat
+  // "egasi yo'q yoki egasi o'zimiz yoki eski egasining belgisi
+  // eskirgan" bo'lsa bajariladi. Ikki server bir vaqtda urinsa,
+  // faqat bittasi yutadi.
+  const claimed = await RegistrationRun.findOneAndUpdate(
+    {
+      _id: runDoc._id,
+      $or: [
+        { ownerId: null },
+        { ownerId: { $exists: false } },
+        { ownerId: SERVER_ID },
+        // Egasi javob bermay qolgan (o'chib qolgan server).
+        { heartbeatAt: { $lt: new Date(Date.now() - OWNER_TIMEOUT_MS) } },
+      ],
+    },
+    { $set: { ownerId: SERVER_ID, ownerName: SERVER_NAME, heartbeatAt: new Date() } },
+    { returnDocument: "after" },
+  );
+
+  if (!claimed) {
+    // Boshqa server ishlayapti — aralashmaymiz.
+    console.log(
+      `[Ro'yxatga olish] "${runDoc.mahallaName}" boshqa serverda ketmoqda, o'tkazib yuborildi`,
+    );
+    return;
+  }
+
   activeRuns.add(runId);
 
   // Ishchi O'Z so'rov kontekstida ishlaydi — ya'ni o'z tokeni bilan.
@@ -1715,5 +1791,11 @@ const runWorker = async (user, runDoc) => {
     });
   } finally {
     activeRuns.delete(runId);
+
+    // Egalikni bo'shatamiz — boshqa server davom ettira olsin.
+    await RegistrationRun.updateOne(
+      { _id: run._id, ownerId: SERVER_ID },
+      { $set: { ownerId: null, ownerName: null } },
+    ).catch(() => {});
   }
 };

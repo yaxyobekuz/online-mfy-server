@@ -57,15 +57,18 @@
 04:35:52  [running] 107/569  +200 xato=54 otdi=79  beat=17s
 04:36:52  [running] 107/569  +201 xato=54 otdi=79  beat=24s
 04:37:52  [running] 107/569  +204 xato=54 otdi=79  beat=1s
-g] 102/569  +195 xato=54 otdi=75  beat=16s
-04:30:33  [running] 103/569  +195 xato=54 otdi=77  beat=7s
-04:31:33  [running] 104/569  +195 xato=54 otdi=77  beat=51s
-04:32:33  [running] 106/569  +196 xato=54 otdi=78  beat=5s
-04:33:33  [running] 106/569  +197 xato=54 otdi=79  beat=5s
+04:38:52  [running] 108/569  +205 xato=54 otdi=79  beat=4s
+04:39:52  [running] 108/569  +205 xato=54 otdi=79  beat=64s  (o'zgarmadi)
+04:40:52  [running] 109/569  +207 xato=54 otdi=79  beat=17s
+04:41:52  [running] 110/569  +207 xato=54 otdi=81  beat=21s
+7 xato=54 otdi=79  beat=5s
 04:34:33  [running] 106/569  +198 xato=54 otdi=79  beat=4s
 04:35:33  [running] 106/569  +199 xato=54 otdi=79  beat=37s
 04:36:33  [running] 107/569  +201 xato=54 otdi=79  beat=5s
 04:37:33  [running] 107/569  +202 xato=54 otdi=79  beat=9s
 04:38:33  [running] 107/569  +204 xato=54 otdi=79  beat=42s
-di=79  beat=28s
-04:38:23  [running] 107/569  +204 xato=54 otdi=79  beat=32s
+04:39:33  [running] 108/569  +205 xato=54 otdi=79  beat=45s
+04:40:33  [running] 108/569  +206 xato=54 otdi=79  beat=32s
+04:41:33  [running] 110/569  +207 xato=54 otdi=81  beat=3s
+tdi=79  beat=22s
+04:41:23  [running] 109/569  +207 xato=54 otdi=80  beat=10s

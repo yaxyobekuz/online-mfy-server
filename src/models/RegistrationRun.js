@@ -70,6 +70,19 @@ const registrationRunSchema = new Schema(
     // Rate-limit tufayli kutilayotgan bo'lsa — shu vaqtgacha.
     waitingUntil: { type: Number, default: null },
 
+    // --- Egalik (bir nechta server uchun) ---
+    //
+    // Bitta bazaga bir nechta server ulanishi mumkin (har biri o'z
+    // IP'sidan so'rov yuboradi). Ishchining "faol" belgisi xotirada
+    // bo'lgani uchun ikkinchi server birinchisining ishlayotganini
+    // ko'rmaydi — natijada bir xonadonga ikki marta so'rov ketardi.
+    //
+    // Shuning uchun egalik DB'da belgilanadi: yurishni faqat bitta
+    // server oladi, qolganlari uning heartbeat'i eskirgunicha
+    // tegmaydi.
+    ownerId: { type: String },
+    ownerName: { type: String },
+
     // Oxirgi marta jonli belgi qo'yilgan vaqt. Server kutilmaganda
     // o'chsa, "running" holatida qotib qolgan yurishni shu orqali
     // aniqlaymiz (davom ettirish taklif qilinadi).

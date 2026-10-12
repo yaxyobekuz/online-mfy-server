@@ -14,6 +14,8 @@ import { REASON_LABELS } from "../utils/registration-codes.js";
 import {
   runRegistration,
   isRunActive,
+  isRunActiveAnywhere,
+  runOwner,
 } from "../services/registration-worker.js";
 
 const PAGE_SIZE = 50;
@@ -64,8 +66,12 @@ const describeRun = (run) => {
   // "running" deb turgan, lekin ishchisi yo'q yurish — server qayta
   // ishga tushganda qoladigan holat. Client "davom ettirish" ni
   // taklif qilishi uchun ajratib ko'rsatamiz.
-  const isActive = isRunActive(run._id);
+  // Faol — SHU serverda yoki boshqasida. Bir nechta server bitta
+  // bazaga ulangan bo'lsa, boshqasidagi yurish "to'xtagan"
+  // ko'rinmasligi kerak.
+  const isActive = isRunActiveAnywhere(run);
   const isStale = run.status === "running" && !isActive;
+  const owner = runOwner(run);
 
   // Token javobga TUSHMASLIGI kerak. Sxemada `select: false`, lekin
   // davom ettirish uchun ba'zi joylarda `+token` bilan o'qiladi —
@@ -80,6 +86,10 @@ const describeRun = (run) => {
     homesPercent,
     isActive,
     isStale,
+    // Qaysi server olib boryapti — bir nechta server ishlaganda
+    // foydalanuvchi buni bilib tursin.
+    owner: owner?.name ?? null,
+    isOwnedHere: owner?.isSelf ?? false,
   };
 };
 
@@ -337,9 +347,12 @@ export const startRegistration = async (req, res) => {
       status: { $in: ["preparing", "running"] },
     }).lean();
 
-    if (running && isRunActive(running._id)) {
+    if (running && isRunActiveAnywhere(running)) {
+      const owner = runOwner(running);
       return res.status(409).json({
-        message: "Bu mahalla bo'yicha jarayon allaqachon ketmoqda",
+        message: owner?.isSelf
+          ? "Bu mahalla bo'yicha jarayon allaqachon ketmoqda"
+          : `Bu mahalla "${owner?.name}" serverida ketmoqda`,
         runId: String(running._id),
       });
     }
@@ -459,8 +472,13 @@ export const controlRegistration = async (req, res) => {
     if (!run) return res.status(404).json({ message: "Yurish topilmadi" });
 
     if (action === "resume") {
-      if (isRunActive(run._id)) {
-        return res.status(200).json({ message: "Jarayon allaqachon ketmoqda" });
+      if (isRunActiveAnywhere(run)) {
+        const owner = runOwner(run);
+        return res.status(200).json({
+          message: owner?.isSelf
+            ? "Jarayon allaqachon ketmoqda"
+            : `Jarayon "${owner?.name}" serverida ketmoqda`,
+        });
       }
 
       // Boshqa MFY yurishlari parallel ketaverishi mumkin: har
