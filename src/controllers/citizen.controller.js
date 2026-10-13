@@ -1,7 +1,6 @@
 import * as XLSX from "xlsx";
 import Citizen from "../models/Citizen.js";
 import { getRequestUser } from "../utils/request-context.js";
-import { invalidateMahallaCache } from "./mahalla.controller.js";
 
 const PAGE_SIZE = 100;
 
@@ -152,10 +151,6 @@ export const uploadCitizens = async (req, res) => {
       });
     }
 
-    // Mahallalar ro'yxati shu ma'lumotdan hisoblanadi — keshni
-    // tozalaymiz, aks holda eski ro'yxat ko'rinib qoladi.
-    invalidateMahallaCache();
-
     return res.status(200).json({ total: mapped.length });
   } catch {
     return res
@@ -291,7 +286,6 @@ export const deleteCitizens = async (req, res) => {
 
   try {
     const result = await Citizen.deleteMany({});
-    invalidateMahallaCache();
 
     return res.status(200).json({ deleted: result.deletedCount });
   } catch {
