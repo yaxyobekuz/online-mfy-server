@@ -1746,10 +1746,10 @@ const runRandomWorker = async (user, runDoc) => {
 
     // Platformada bitta xonadonga cheklangan sondagi a'zo kiritiladi
     // ("хонадонга N тадан зиёд оила азоси киритиш мумкин эмас").
-    // N xonadonga qarab 15 yoki 20 bo'lishi aniqlandi, shuning
-    // uchun ehtiyotkor qiymat olinadi: 15 dan oshsa ham, platforma
-    // rad etgan zahoti xonadon to'lgan deb belgilanadi (pastda).
-    const HOME_MEMBER_LIMIT = 15;
+    // Amalda N = 20 (ba'zi xonadonlarda 15). Shuning uchun 20 gacha
+    // urinamiz: limit pastroq bo'lsa, platforma rad etgan zahoti
+    // xonadon to'lgan deb belgilanadi (pastda).
+    const HOME_MEMBER_LIMIT = 20;
     let membersInHome = existing.length;
 
     pushRunLog(run._id, {

@@ -649,17 +649,28 @@ export const randomStart = async (req, res) => {
       // Qiymati 0 yoki 1 bo'lishidan qat'i nazar bir xil xonadonlar
       // keladi, shuning uchun 0 qoldirilgan.
       // Platformada bitta xonadonga cheklangan sondagi a'zo sig'adi
-      // (xonadonga qarab 15 yoki 20). Birinchi uchragan xonadon
-      // odatda to'la bo'ladi, shuning uchun bo'sh joyi borini
-      // qidiramiz — aks holda hamma so'rov "N tadan ziyod" deb rad
-      // etilardi.
-      const HOME_MEMBER_LIMIT = 15;
+      // (odatda 20, ba'zan 15). Birinchi uchragan xonadon odatda
+      // to'la bo'ladi, shuning uchun bo'sh joyi borini qidiramiz —
+      // aks holda hamma so'rov "N tadan ziyod" deb rad etilardi.
+      const HOME_MEMBER_LIMIT = 20;
 
       // Nechta xonadonni tekshiramiz: har biri 2 ta so'rov, ya'ni
-      // rate-limit bilan uzoq kutish. Bittasi topilsa yetarli —
-      // qolganini ishchining o'zi topadi.
-      const MAX_PROBES = 10;
+      // rate-limit bilan uzoq kutish. Lekin juda kam tekshirish ham
+      // yaramaydi: oldingi yurishlardan keyin birinchi o'nlab
+      // xonadon to'lib qolgan bo'ladi va qidiruv "xonadon topilmadi"
+      // deb to'xtab qolardi.
+      const MAX_PROBES = 60;
       let probes = 0;
+
+      // Oldingi yurishlarda O'ZIMIZ to'ldirgan xonadonlarni
+      // bilamiz — ularni platformadan qayta so'rab, rate-limitni
+      // behuda sarflamaymiz.
+      const filled = await RegistrationMember.aggregate([
+        { $match: { userUid: user.uid, status: "added" } },
+        { $group: { _id: "$homeId", n: { $sum: 1 } } },
+        { $match: { n: { $gte: 12 } } },
+      ]);
+      const likelyFull = new Set(filled.map((row) => String(row._id)));
 
       outer: for (const street of streets) {
         const homesResponse = await api.get("/api/v1/survey_homes_street/cache/data", {
@@ -678,6 +689,7 @@ export const randomStart = async (req, res) => {
 
         for (const home of homes) {
           if (probes >= MAX_PROBES) break outer;
+          if (likelyFull.has(String(home.id))) continue;
           probes += 1;
 
           const form = await api
