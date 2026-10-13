@@ -7,6 +7,7 @@ import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser, getRequestToken } from "../utils/request-context.js";
 import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
+import { cadasterKey } from "../utils/cadaster.js";
 import { getRateLimitState } from "../utils/rate-limit.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
 import {
@@ -106,14 +107,36 @@ const resolveMahalla = async (user) => {
 
   // 2. Aks holda: platformadagi xonadonlar kadastrlari qaysi
   //    mahallaga tegishli ekanini fuqarolar bazasidan qaraymiz.
+  //
+  // Kadastr uch xil yoziladi ("17:03:...", "17030102...",
+  // "17 030 ... "), shuning uchun taqqoslash RAQAM bo'yicha ketadi
+  // (`cadasterKey`). Avval aynan moslik qidirilardi va shu sababli
+  // bir qism xonadon chetda qolardi.
   const cadasters = (
     await Home.distinct("cadasterNumber", { userUid: user.uid })
   ).filter(Boolean);
 
   if (!cadasters.length) return null;
 
+  const wanted = new Set();
+  for (const value of cadasters) {
+    const key = cadasterKey(value);
+    if (key) wanted.add(key);
+  }
+
+  if (!wanted.size) return null;
+
+  // Fuqarolar bazasidagi mos kadastrlarning ASL yozilishi.
+  const citizenCadasters = await Citizen.distinct("cadasterNumber");
+  const matched = citizenCadasters.filter((value) => {
+    const key = cadasterKey(value);
+    return key ? wanted.has(key) : false;
+  });
+
+  if (!matched.length) return null;
+
   const rows = await Citizen.aggregate([
-    { $match: { cadasterNumber: { $in: cadasters } } },
+    { $match: { cadasterNumber: { $in: matched } } },
     { $group: { _id: "$address", count: { $sum: 1 } } },
   ]);
 
@@ -408,9 +431,17 @@ export const controlDashboard = async (req, res) => {
       const mahalla = await resolveMahalla(user);
 
       if (!mahalla) {
+        // Diqqat: sabab odatda Excel EMAS. Fuqarolar bazasi joyida
+        // turgan bo'lsa ham, shu token uchun platformadan
+        // xonadonlar hali yuklanmagan bo'ladi — "Hisoblash" aynan
+        // shuni qiladi. Avvalgi matn "Excel yuklang" deb turardi va
+        // chalg'itardi: baza to'la bo'lsa ham xato o'zgarmasdi.
+        const citizensTotal = await Citizen.estimatedDocumentCount();
+
         return res.status(404).json({
-          message:
-            "Bu token uchun mahalla aniqlanmadi — avval ma'lumotlar bazasiga Excel yuklang",
+          message: citizensTotal
+            ? "Mahalla hali hisoblanmagan — avval \"Hisoblash\" tugmasini bosing"
+            : "Fuqarolar bazasi bo'sh — avval Excel yuklang",
         });
       }
 
