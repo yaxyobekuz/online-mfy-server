@@ -1,3 +1,4 @@
+import Citizen from "../models/Citizen.js";
 import RegistrationRun from "../models/RegistrationRun.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
@@ -49,6 +50,14 @@ export const streamDashboard = async (req, res) => {
   // Oldingi holat — faqat o'zgarganda yuborish uchun.
   let previous = null;
 
+  // "Jami aholi" — navbat tuzilgach O'ZGARMAYDI, shuning uchun
+  // ulanish davomida bir marta sanaladi. Har sekundda qayta
+  // sanash 32 ming kadastrli so'rovni bekorga takrorlardi.
+  //
+  // Kalit bilan saqlanadi: yangi yurish boshlansa yoki navbat
+  // o'sib qolsa, qaytadan sanaladi.
+  let peopleCache = { key: null, total: 0 };
+
   const collect = async () => {
     const run = await RegistrationRun.findOne({ userUid: user.uid })
       .sort({ createdAt: -1 })
@@ -56,12 +65,16 @@ export const streamDashboard = async (req, res) => {
 
     if (!run) return { run: null, stats: null, members: [], currentHome: null };
 
-    const [byStatus, homesTotal, members, currentHome] = await Promise.all([
+    const [byStatus, homesTotal, cadasters, members, currentHome] =
+      await Promise.all([
       RegistrationMember.aggregate([
         { $match: { runId: run._id } },
         { $group: { _id: "$status", count: { $sum: 1 } } },
       ]),
       RegistrationHome.countDocuments({ runId: run._id }),
+      // Navbatdagi kadastrlar — "jami aholi" shular bo'yicha
+      // ANIQ sanaladi (taxmin emas, pastga qarang).
+      RegistrationHome.distinct("cadasterNumber", { runId: run._id }),
       RegistrationMember.find({
         runId: run._id,
         // "pending" — hali urinilmagan, natijasi yo'q.
@@ -87,9 +100,30 @@ export const streamDashboard = async (req, res) => {
 
     const attempted = added + exists + failed;
     const homesDone = run.homesDone ?? 0;
-    const homesLeft = Math.max(0, homesTotal - homesDone);
-    const perHome = homesDone > 0 ? attempted / homesDone : 0;
-    const pending = Math.round(homesLeft * perHome);
+    // "Jami aholi" — ANIQ son, taxmin emas.
+    //
+    // Avval qolganlar o'rtacha bilan baholanardi; o'rtacha esa har
+    // xonadondan keyin siljib, jami raqam doimiy o'zgarib turardi
+    // (990, 987, 991...). Oqim har sekundda yangilangani uchun bu
+    // ayniqsa ko'zga tashlanardi. Ishchi odamlarni kadastr bo'yicha
+    // topadi, shuning uchun shu kadastrlardagi fuqarolarni sanash
+    // kifoya — bu son jarayon davomida o'zgarmaydi.
+    const cacheKey = `${run._id}:${cadasters.length}`;
+
+    if (peopleCache.key !== cacheKey) {
+      peopleCache = {
+        key: cacheKey,
+        total: await Citizen.countDocuments({
+          cadasterNumber: { $in: cadasters.filter(Boolean) },
+        }),
+      };
+    }
+
+    const peopleTotal = peopleCache.total;
+
+    // Bitta odam qayta urinilgan bo'lishi mumkin — ayirma manfiy
+    // chiqmasin.
+    const pending = Math.max(0, peopleTotal - attempted);
 
     const isActive = isRunActiveAnywhere(run);
 
@@ -104,7 +138,7 @@ export const streamDashboard = async (req, res) => {
         error: run.error ?? null,
       },
       stats: {
-        peopleTotal: attempted + pending,
+        peopleTotal,
         added: added + exists,
         failed,
         pending,

@@ -99,9 +99,23 @@ const resolveMahalla = async (user) => {
 /**
  * Maketdagi 5 ta KPI kartasi uchun ko'rsatkichlar.
  *
- * Diqqat: "jami aholi" butun fuqarolar bazasidan emas, shu
- * YURISHGA tegishli odamlardan hisoblanadi. Aks holda butun
- * tumandagi 150 ming odam ko'rinib, foiz ma'nosiz bo'lib qolardi.
+ * "Jami aholi" — navbatdagi xonadonlarga tegishli fuqarolarning
+ * ANIQ soni, taxmin emas.
+ *
+ * Nega bu muhim: avval qolganlar o'rtacha bilan baholanardi
+ * (`urinilgan / tugagan_xonadon * qolgan_xonadon`). O'rtacha esa
+ * har xonadondan keyin siljiydi, natijada "jami" raqami doimiy
+ * o'zgarib turardi — 990, 987, 991... Foydalanuvchi aniq sonni
+ * bila olmasdi va jarayon noto'g'ri ketayotgandek ko'rinardi.
+ *
+ * Endi son manbadan to'g'ridan-to'g'ri sanaladi: ishchi odamlarni
+ * aynan `cadasterNumber` bo'yicha topadi (`registration-worker.js`),
+ * shuning uchun navbatdagi kadastrlarga tegishli fuqarolarni
+ * sanash kifoya. Bu son jarayon davomida O'ZGARMAYDI.
+ *
+ * Diqqat: butun fuqarolar bazasi emas, faqat SHU yurish navbati —
+ * aks holda tumandagi 185 ming odam ko'rinib, foiz ma'nosiz
+ * bo'lib qolardi.
  */
 const collectStats = async (run) => {
   const empty = {
@@ -116,12 +130,15 @@ const collectStats = async (run) => {
 
   if (!run) return empty;
 
-  const [byStatus, homesTotal] = await Promise.all([
+  const [byStatus, homesTotal, cadasters] = await Promise.all([
     RegistrationMember.aggregate([
       { $match: { runId: run._id } },
       { $group: { _id: "$status", count: { $sum: 1 } } },
     ]),
     RegistrationHome.countDocuments({ runId: run._id }),
+    // Navbatdagi xonadonlarning kadastrlari — "jami aholi" shular
+    // bo'yicha sanaladi.
+    RegistrationHome.distinct("cadasterNumber", { runId: run._id }),
   ]);
 
   const count = (status) =>
@@ -135,14 +152,17 @@ const collectStats = async (run) => {
   const attempted = added + exists + failed;
   const homesDone = run.homesDone ?? 0;
 
-  // Hali navbatda turganlar: ishlanmagan xonadonlardagi odamlar
-  // oldindan noma'lum, shuning uchun o'rtacha bilan baholanadi.
-  const homesLeft = Math.max(0, homesTotal - homesDone);
-  const perHome = homesDone > 0 ? attempted / homesDone : 0;
-  const pending = Math.round(homesLeft * perHome);
+  const peopleTotal = await Citizen.countDocuments({
+    cadasterNumber: { $in: cadasters.filter(Boolean) },
+  });
+
+  // Qolganlar — ayirma bilan. Urinishlar sonidan oshib ketmasin:
+  // bitta odam qayta urinilgan bo'lishi mumkin (xonadon qayta
+  // ishlanganda), shunda ayirma manfiy chiqardi.
+  const pending = Math.max(0, peopleTotal - attempted);
 
   return {
-    peopleTotal: attempted + pending,
+    peopleTotal,
     // "Ro'yxatga olingan" ichiga allaqachon ro'yxatda turganlar ham
     // kiradi: mahalla xodimi uchun natija bir xil — odam bazada bor.
     added: added + exists,
