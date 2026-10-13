@@ -461,7 +461,8 @@ const verifyCitizen = async (citizen, run) => {
 
       passport = {
         fullName: person.full_name,
-        birthDate: person.birth_date ?? isoBirthDate,
+        // Baza "DD.MM.YYYY" qaytarishi mumkin — platforma ISO kutadi.
+        birthDate: toIsoDate(person.birth_date) ?? person.birth_date ?? isoBirthDate,
         pinfl: String(person.pinfl),
         docSeries: series,
         docNumber: number,
@@ -482,7 +483,12 @@ const verifyCitizen = async (citizen, run) => {
 
       cert = {
         fullName: joinName(person.surname, person.name, person.patronym),
-        birthDate: person.birth_date,
+        // FHDYO sanani "DD.MM.YYYY" ko'rinishida qaytaradi, platforma
+        // esa ISO ("YYYY-MM-DD") kutadi. Aylantirmasdan yuborilsa
+        // platforma sababini aytmay 500 qaytaradi — aynan shu sabab
+        // guvohnomali bolalar ommaviy ravishda "Tashqi server xatosi"
+        // bo'lib qolardi.
+        birthDate: toIsoDate(person.birth_date) ?? isoBirthDate,
         pinfl: person.pinfl != null ? String(person.pinfl) : null,
         docSeries: person.cert_series ?? series,
         docNumber: person.cert_number ?? number,
@@ -557,8 +563,9 @@ const verifyCitizen = async (citizen, run) => {
           cert?.fullName ??
           passport?.fullName ??
           citizen.fullName,
-        // Platforma ISO (YYYY-MM-DD) formatni kutadi.
-        birthDate: person.birth_date ?? isoBirthDate,
+        // Platforma ISO (YYYY-MM-DD) formatni kutadi. GCP ba'zan
+        // "DD.MM.YYYY" beradi, shuning uchun aylantiramiz.
+        birthDate: toIsoDate(person.birth_date) ?? person.birth_date ?? isoBirthDate,
         pinfl:
           person.current_pinfl != null ? String(person.current_pinfl) : pinfl,
         docSeries: series ?? cert?.docSeries ?? passport?.docSeries,
@@ -922,7 +929,10 @@ const registerOneMember = async (
     full_name: verified.fullName,
     address: null,
     phone: "",
-    birth_date: verified.birthDate,
+    // Oxirgi himoya: qaysi bazadan kelganidan qat'i nazar sana ISO
+    // bo'lib ketsin. Platforma "DD.MM.YYYY" ni qabul qilmaydi va
+    // sababini aytmay 500 qaytaradi.
+    birth_date: toIsoDate(verified.birthDate) ?? verified.birthDate,
     study_level_id: String(studyLevel),
     doc_serial: verified.docSeries,
     doc_number: verified.docNumber,
