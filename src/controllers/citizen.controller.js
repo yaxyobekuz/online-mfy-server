@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import Citizen from "../models/Citizen.js";
 import { getRequestUser } from "../utils/request-context.js";
+import { resetCadasterCache } from "../services/registration-worker.js";
 
 const PAGE_SIZE = 100;
 
@@ -145,6 +146,9 @@ export const uploadCitizens = async (req, res) => {
 
     await Citizen.deleteMany({});
 
+    // Baza almashdi — ishchidagi kadastr keshi eskirdi.
+    resetCadasterCache();
+
     for (let i = 0; i < mapped.length; i += INSERT_CHUNK) {
       await Citizen.insertMany(mapped.slice(i, i + INSERT_CHUNK), {
         ordered: false,
@@ -286,6 +290,8 @@ export const deleteCitizens = async (req, res) => {
 
   try {
     const result = await Citizen.deleteMany({});
+
+    resetCadasterCache();
 
     return res.status(200).json({ deleted: result.deletedCount });
   } catch {
