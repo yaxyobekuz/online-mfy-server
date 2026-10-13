@@ -27,7 +27,6 @@
  * paydo bo'lmaydi.
  */
 
-import mongoose from "mongoose";
 import api from "../config/api.js";
 import Citizen from "../models/Citizen.js";
 import Street from "../models/Street.js";
@@ -1700,9 +1699,18 @@ const runRandomWorker = async (user, runDoc) => {
     let attempted = 0;
     const triedCitizenIds = new Set();
     let consecutiveMisses = 0;
-    const MAX_CONSECUTIVE_MISSES = 100;
+
+    // Ketma-ket shuncha urinish behuda ketsa, to'xtaymiz. Qiymat
+    // katta: bazadagi fuqarolarning bir qismi allaqachon ro'yxatda
+    // yoki JSHSHIRsiz, ya'ni "behuda" urinishlar tabiiy holat.
+    const MAX_CONSECUTIVE_MISSES = 300;
+
+    // Bir so'rovda shuncha nomzod olinadi.
+    const SAMPLE_SIZE = 50;
+    let candidates = [];
 
     // Virtual homeRow — random rejimda bitta xonadon ishlatiladi.
+    // Xonadon to'lib qolsa, `moveToNextHome` uni almashtiradi.
     const homeRow = {
       _id: run._id,
       homeId,
@@ -1710,6 +1718,84 @@ const runRandomWorker = async (user, runDoc) => {
       surveyUuid,
       ownerPinfl,
       cadasterNumber: "random",
+    };
+
+    // Platformada bitta xonadonga ko'pi bilan 20 ta a'zo kiritiladi
+    // ("хонадонга 20 тадан зиёд оила азоси киритиш мумкин эмас").
+    // Shuning uchun hozirgi a'zolar sanab boriladi va limitga
+    // yetganda keyingi xonadonga o'tiladi.
+    const HOME_MEMBER_LIMIT = 20;
+    let membersInHome = existing.length;
+
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Xonadonda hozir ${membersInHome} a'zo bor (limit ${HOME_MEMBER_LIMIT})`,
+    });
+
+    // Bo'sh joyi bor keyingi xonadonni topadi.
+    //
+    // Nega kerak: maqsad 30 ta bo'lsa, bitta xonadon yetmaydi —
+    // limit 20. Xonadon to'lgach jarayon to'xtab qolmasligi uchun
+    // navbatdagi xonadonga o'tamiz.
+    const visitedHomeIds = new Set([String(homeId)]);
+
+    const moveToNextHome = async () => {
+      const streets = await fetchStreets(user, run);
+
+      for (const street of streets) {
+        const homes = await fetchStreetHomes(user, String(street.id), run);
+
+        for (const home of homes) {
+          const nextHomeId = String(home.id);
+          if (visitedHomeIds.has(nextHomeId)) continue;
+          visitedHomeIds.add(nextHomeId);
+
+          const form = await fetchHomeForm(user, nextHomeId, run);
+          if (!form?.survey_uuid) continue;
+
+          const members = await fetchFamilyMembers(
+            user,
+            String(street.id),
+            form.survey_uuid,
+            run,
+          ).catch(() => []);
+
+          if (members.length >= HOME_MEMBER_LIMIT) continue;
+
+          // Topildi — shu xonadonga o'tamiz.
+          homeRow.homeId = nextHomeId;
+          homeRow.streetId = String(street.id);
+          homeRow.surveyUuid = form.survey_uuid;
+          homeRow.ownerPinfl = form.pinfl ? String(form.pinfl) : null;
+          membersInHome = members.length;
+
+          for (const person of members) {
+            if (person.pinfl) knownPinfls.add(String(person.pinfl));
+          }
+          if (homeRow.ownerPinfl) knownPinfls.add(homeRow.ownerPinfl);
+
+          await RegistrationRun.updateOne(
+            { _id: run._id },
+            {
+              $set: {
+                randomHomeId: homeRow.homeId,
+                randomStreetId: homeRow.streetId,
+                randomSurveyUuid: homeRow.surveyUuid,
+                randomOwnerPinfl: homeRow.ownerPinfl,
+              },
+            },
+          );
+
+          pushRunLog(run._id, {
+            level: "info",
+            message: `Keyingi xonadonga o'tildi — ${home.home_num ?? nextHomeId}-uy (${members.length} a'zo)`,
+          });
+
+          return true;
+        }
+      }
+
+      return false;
     };
 
     while (added < target) {
@@ -1750,11 +1836,21 @@ const runRandomWorker = async (user, runDoc) => {
         break;
       }
 
-      const excludeIds = [...triedCitizenIds].map((id) => new mongoose.Types.ObjectId(id));
-      const [citizen] = await Citizen.aggregate([
-        { $match: { _id: { $nin: excludeIds } } },
-        { $sample: { size: 1 } },
-      ]);
+      // Random tanlash.
+      //
+      // Nega `$nin` emas: urinilganlar ro'yxati har qadamda o'sadi va
+      // uni butunlay Mongo'ga yuborish 30-maqsadda ham minglab
+      // ObjectId degani — so'rov asta-sekin sekinlashadi. Buning
+      // o'rniga bir nechta nomzod olib, ulardan hali urinilmaganini
+      // tanlaymiz: so'rov hajmi doimiy bo'lib qoladi.
+      //
+      // Navbat buferi: har bir tanlashda alohida so'rov yubormaslik
+      // uchun bir yo'la bir nechtasi olinadi.
+      if (!candidates.length) {
+        candidates = await Citizen.aggregate([{ $sample: { size: SAMPLE_SIZE } }]);
+      }
+
+      const citizen = candidates.pop();
 
       if (!citizen) {
         pushRunLog(run._id, {
@@ -1762,6 +1858,12 @@ const runRandomWorker = async (user, runDoc) => {
           message: "Boshqa fuqaro qolmadi",
         });
         break;
+      }
+
+      // Bu namunada allaqachon urinilgan bo'lsa — keyingisiga.
+      if (triedCitizenIds.has(String(citizen._id))) {
+        consecutiveMisses += 1;
+        continue;
       }
 
       triedCitizenIds.add(String(citizen._id));
@@ -1779,6 +1881,31 @@ const runRandomWorker = async (user, runDoc) => {
       if (sourcePinfl && hopelessPinfls.has(sourcePinfl)) {
         consecutiveMisses += 1;
         skipped += 1;
+        continue;
+      }
+
+      // Xonadon to'lgan bo'lsa — keyingisiga o'tamiz. Aks holda
+      // platforma har bir so'rovni "20 tadan ziyod" deb rad etadi
+      // va rate-limit bekorga sarflanadi.
+      if (membersInHome >= HOME_MEMBER_LIMIT) {
+        pushRunLog(run._id, {
+          level: "info",
+          message: `Xonadon to'ldi (${membersInHome}/${HOME_MEMBER_LIMIT}) — keyingisi qidirilmoqda`,
+        });
+
+        const moved = await moveToNextHome();
+
+        if (!moved) {
+          pushRunLog(run._id, {
+            level: "info",
+            message: "Bo'sh joyi bor xonadon topilmadi — jarayon tugadi",
+          });
+          break;
+        }
+
+        // Xonadon almashdi: shu fuqaroni keyingi aylanishda qayta
+        // ko'rib chiqamiz.
+        triedCitizenIds.delete(String(citizen._id));
         continue;
       }
 
@@ -1805,6 +1932,7 @@ const runRandomWorker = async (user, runDoc) => {
 
       if (result === "added") {
         added += 1;
+        membersInHome += 1;
         consecutiveMisses = 0;
 
         await RegistrationRun.updateOne(
@@ -1821,6 +1949,24 @@ const runRandomWorker = async (user, runDoc) => {
       } else if (result === "failed") {
         failed += 1;
         consecutiveMisses += 1;
+
+        // Platforma "20 tadan ziyod" desa — bizning hisobimiz
+        // noto'g'ri bo'lgan (xonadonda biz ko'rmagan a'zolar bor).
+        // Darhol to'lgan deb belgilaymiz, keyingi aylanishda
+        // xonadon almashadi.
+        const last = await RegistrationMember.findOne(
+          { runId: run._id, citizenId: citizen._id },
+          "reason",
+        )
+          .sort({ createdAt: -1 })
+          .lean();
+
+        if (/20\s*тадан|20\s*tadan/i.test(last?.reason ?? "")) {
+          membersInHome = HOME_MEMBER_LIMIT;
+          // Bu fuqaroning aybi yo'q — keyingi xonadonda qayta
+          // urinib ko'rilsin.
+          triedCitizenIds.delete(String(citizen._id));
+        }
       } else {
         skipped += 1;
         consecutiveMisses += 1;

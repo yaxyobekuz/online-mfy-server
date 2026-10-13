@@ -643,7 +643,24 @@ export const randomStart = async (req, res) => {
       }
 
       // Xonadon bor ko'chani topamiz.
-      for (const street of streets) {
+      //
+      // Diqqat: `surveyed` MAJBURIY parametr — uni yubormasa
+      // platforma bo'sh ro'yxat qaytaradi (tekshirildi: 0 ta).
+      // Qiymati 0 yoki 1 bo'lishidan qat'i nazar bir xil xonadonlar
+      // keladi, shuning uchun 0 qoldirilgan.
+      // Platformada bitta xonadonga ko'pi bilan 20 ta a'zo sig'adi.
+      // Birinchi uchragan xonadon odatda to'la bo'ladi, shuning
+      // uchun bo'sh joyi borini qidiramiz — aks holda hamma so'rov
+      // "20 tadan ziyod" deb rad etilardi.
+      const HOME_MEMBER_LIMIT = 20;
+
+      // Nechta xonadonni tekshiramiz: har biri 2 ta so'rov, ya'ni
+      // rate-limit bilan uzoq kutish. Bittasi topilsa yetarli —
+      // qolganini ishchining o'zi topadi.
+      const MAX_PROBES = 10;
+      let probes = 0;
+
+      outer: for (const street of streets) {
         const homesResponse = await api.get("/api/v1/survey_homes_street/cache/data", {
           params: {
             obl_id: user.oblId,
@@ -652,38 +669,58 @@ export const randomStart = async (req, res) => {
             street_id: String(street.id),
             surveyed: 0,
             page: 1,
-            size: 1,
+            size: 100,
           },
         });
 
         const homes = homesResponse.data?.results ?? [];
-        if (homes.length) {
-          homeId = String(homes[0].id);
+
+        for (const home of homes) {
+          if (probes >= MAX_PROBES) break outer;
+          probes += 1;
+
+          const form = await api
+            .get(`/web/v1/forms/survey_homes/${home.id}`, {
+              params: {
+                obl_id: user.oblId,
+                area_id: user.areaId,
+                district_id: user.districtId,
+              },
+            })
+            .then((r) => r.formData ?? null)
+            .catch(() => null);
+
+          if (!form?.survey_uuid) continue;
+
+          const members = await api
+            .get("/web/v1/tables/survey_homes_family/data", {
+              params: {
+                obl_id: user.oblId,
+                area_id: user.areaId,
+                district_id: user.districtId,
+                street_id: String(street.id),
+                survey_uuid: form.survey_uuid,
+              },
+            })
+            .then((r) => r.data?.results ?? [])
+            .catch(() => []);
+
+          if (members.length >= HOME_MEMBER_LIMIT) continue;
+
+          homeId = String(home.id);
           streetId = String(street.id);
-          break;
+          surveyUuid = form.survey_uuid;
+          ownerPinfl = form.pinfl ? String(form.pinfl) : null;
+          break outer;
         }
       }
 
-      if (!homeId || !streetId) {
-        return res.status(404).json({ message: "Xonadon topilmadi — ko'chalarda xonadon yo'q" });
+      if (!homeId || !streetId || !surveyUuid) {
+        return res.status(404).json({
+          message: `Bo'sh joyi bor xonadon topilmadi (${probes} ta tekshirildi) — hammasi to'lgan bo'lishi mumkin`,
+        });
       }
 
-      // Tanlangan xonadon formasi — survey_uuid olish.
-      const formResponse = await api.get(`/web/v1/forms/survey_homes/${homeId}`, {
-        params: {
-          obl_id: user.oblId,
-          area_id: user.areaId,
-          district_id: user.districtId,
-        },
-      });
-
-      const formData = formResponse.formData ?? null;
-      if (!formData?.survey_uuid) {
-        return res.status(400).json({ message: "Xonadon formasi yuklanmadi yoki survey_uuid yo'q" });
-      }
-
-      surveyUuid = formData.survey_uuid;
-      ownerPinfl = formData.pinfl ? String(formData.pinfl) : null;
     }
 
     // Mahalla nomini aniqlash.
