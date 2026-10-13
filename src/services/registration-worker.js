@@ -1676,18 +1676,19 @@ const runRandomWorker = async (user, runDoc) => {
       if (key) certPinfls.set(key, String(row.verifiedPinfl));
     }
 
-    // MFY ga tegishli barcha fuqarolar sonini olamiz.
     const totalCitizens = await Citizen.countDocuments();
     if (!totalCitizens) throw new Error("Fuqarolar bazasi bo'sh");
+
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Bazada ${totalCitizens} fuqaro — random tanlash boshlanmoqda`,
+    });
 
     let added = 0;
     let failed = 0;
     let skipped = 0;
     let attempted = 0;
-    // Xuddi shu fuqarolarni qayta tanlashni oldini olish.
     const triedCitizenIds = new Set();
-    // Ketma-ket muvaffaqiyatsiz urinishlar soni — barchasi
-    // urinib ko'rilgan bo'lsa cheksiz aylanishning oldini oladi.
     let consecutiveMisses = 0;
     const MAX_CONSECUTIVE_MISSES = 100;
 
@@ -1739,9 +1740,9 @@ const runRandomWorker = async (user, runDoc) => {
         break;
       }
 
-      // Random fuqaro tanlash — MongoDB $sample.
+      const excludeIds = [...triedCitizenIds].map((id) => new mongoose.Types.ObjectId(id));
       const [citizen] = await Citizen.aggregate([
-        { $match: { _id: { $nin: [...triedCitizenIds].map((id) => new mongoose.Types.ObjectId(id)) } } },
+        { $match: { _id: { $nin: excludeIds } } },
         { $sample: { size: 1 } },
       ]);
 
