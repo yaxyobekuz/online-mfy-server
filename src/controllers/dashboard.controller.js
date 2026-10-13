@@ -35,6 +35,10 @@ import {
 // qator sig'adi, zaxira bilan olamiz.
 const FEED_LIMIT = 40;
 
+// Xonadon shu holatlarda ishlab bo'lingan hisoblanadi: undagi hamma
+// odam ko'rib chiqilgan.
+const FINISHED_HOME_STATUSES = ["done", "partial", "skipped", "failed"];
+
 const requireUser = (res) => {
   const user = getRequestUser();
   if (!user) {
@@ -130,27 +134,71 @@ export const collectStats = async (run, userUid) => {
 
   if (!run) return empty;
 
-  // Hisob BITTA yurish bo'yicha emas, shu MFY ning hamma yurishlari
-  // bo'yicha ketadi.
-  //
-  // Nega: ilgari tugagan yurishdan keyin "Boshlash" bosilsa yangi
-  // bo'sh yurish yaratilardi va panel faqat o'shani ko'rsatardi —
-  // oldingi 855 kiritilgan odam ko'rinmay, hammasi noldan
-  // boshlangandek tuyulardi.
-  //
-  // Sanoq ODAM bo'yicha (JSHSHIR yoki ism), urinish bo'yicha emas:
-  // bir odam bir necha marta urinilgan bo'lishi mumkin va har
-  // urinish alohida sanalsa, raqamlar haqiqatdan katta chiqardi.
-  //
-  // Bir odamda bir nechta urinish turli natija bergan bo'lsa, eng
-  // YAXSHISI olinadi: muvaffaqiyat (added/exists) xatodan ustun —
-  // odam baribir bazaga kirgan.
+  // Hisob BITTA yurish bo'yicha emas, shu MFY ning HAMMA yurishlari
+  // bo'yicha ketadi: ilgari tugagan yurishdan keyin "Boshlash"
+  // bosilsa yangi bo'sh yurish yaratilardi va panel faqat o'shani
+  // ko'rsatib, oldingi ish ko'rinmay qolardi.
   const runIds = await RegistrationRun.distinct("_id", {
     userUid,
     mahallaKey: run.mahallaKey,
   });
 
-  const [people, cadasters] = await Promise.all([
+  // --- Xonadonlar ---
+  //
+  // Bir kadastr bir necha yurishda uchrashi mumkin, shuning uchun
+  // har kadastrdan BITTA — eng yaxshi — holat olinadi.
+  const homeRows = await RegistrationHome.find(
+    { runId: { $in: runIds } },
+    "cadasterNumber status",
+  ).lean();
+
+  const bestStatus = new Map();
+
+  for (const row of homeRows) {
+    if (!row.cadasterNumber) continue;
+
+    const current = bestStatus.get(row.cadasterNumber);
+    const isFinished = FINISHED_HOME_STATUSES.includes(row.status);
+
+    if (!current || (isFinished && !FINISHED_HOME_STATUSES.includes(current))) {
+      bestStatus.set(row.cadasterNumber, row.status);
+    }
+  }
+
+  const allCadasters = [...bestStatus.keys()];
+
+  // Hali ishlanmagan xonadonlar — "kutilmoqda" aynan shular
+  // bo'yicha hisoblanadi.
+  const pendingCadasters = allCadasters.filter(
+    (cadaster) => !FINISHED_HOME_STATUSES.includes(bestStatus.get(cadaster)),
+  );
+
+  const homesTotal = allCadasters.length;
+  const homesDone = homesTotal - pendingCadasters.length;
+
+  // --- Odamlar ---
+  const [peopleTotal, pending, people] = await Promise.all([
+    Citizen.countDocuments({ cadasterNumber: { $in: allCadasters } }),
+
+    // KUTILMOQDA = hali ishlanmagan xonadonlardagi odamlar.
+    //
+    // Nega ayirma bilan emas: ishchi platformada ALLAQACHON turgan
+    // odamga so'rov yubormaydi (rate-limit ni tejash uchun), ya'ni
+    // ularda `RegistrationMember` yozuvi umuman bo'lmaydi. Ayirma
+    // bilan hisoblaganda ular "navbatda" bo'lib qolardi va xonadon
+    // 424/424 tugagan holda ham "53 kishi kutilmoqda" ko'rinardi.
+    //
+    // Xonadon tugagan bo'lsa, undagi HAMMA odam ko'rib chiqilgan:
+    // kimdir kiritilgan, kimdir rad etilgan, kimdir allaqachon
+    // ro'yxatda bo'lgan. Kutayotgani qolmaydi.
+    pendingCadasters.length
+      ? Citizen.countDocuments({ cadasterNumber: { $in: pendingCadasters } })
+      : 0,
+
+    // Urinishlar ODAM bo'yicha guruhlanadi: bir odam bir necha marta
+    // urinilgan bo'lishi mumkin (xonadon qayta ishlanganda).
+    // Turli natija chiqqan bo'lsa eng yaxshisi olinadi — odam
+    // baribir bazaga kirgan.
     RegistrationMember.aggregate([
       { $match: { runId: { $in: runIds } } },
       {
@@ -163,14 +211,8 @@ export const collectStats = async (run, userUid) => {
             $max: {
               $switch: {
                 branches: [
-                  {
-                    case: { $in: ["$status", ["added", "exists"]] },
-                    then: 2,
-                  },
-                  {
-                    case: { $in: ["$status", ["failed", "skipped"]] },
-                    then: 1,
-                  },
+                  { case: { $in: ["$status", ["added", "exists"]] }, then: 2 },
+                  { case: { $in: ["$status", ["failed", "skipped"]] }, then: 1 },
                 ],
                 default: 0,
               },
@@ -180,41 +222,23 @@ export const collectStats = async (run, userUid) => {
       },
       { $group: { _id: "$best", count: { $sum: 1 } } },
     ]),
-    // Xonadonlar KADASTR bo'yicha sanaladi, yozuv bo'yicha emas:
-    // bir mahallada bir nechta yurish bo'lsa, har birining o'z
-    // navbati bor va bitta xonadon bir necha marta sanalardi
-    // (424 o'rniga 1696 chiqardi).
-    RegistrationHome.distinct("cadasterNumber", { runId: { $in: runIds } }),
   ]);
-
-  const homesTotal = cadasters.filter(Boolean).length;
 
   const byBest = (value) =>
     people.find((row) => row._id === value)?.count ?? 0;
 
-  const added = byBest(2);
   const failed = byBest(1);
 
-  const peopleTotal = await Citizen.countDocuments({
-    cadasterNumber: { $in: cadasters.filter(Boolean) },
-  });
-
-  // Qolganlar — ayirma bilan.
-  const pending = Math.max(0, peopleTotal - added - failed);
-
-  // Tugagan xonadonlar ham kadastr bo'yicha — bitta xonadon
-  // qayta ishlangan bo'lsa ikki marta sanalmasin.
-  const doneCadasters = await RegistrationHome.distinct("cadasterNumber", {
-    runId: { $in: runIds },
-    status: { $in: ["done", "partial", "skipped", "failed"] },
-  });
-
-  const homesDone = doneCadasters.filter(Boolean).length;
+  // RO'YXATGA OLINGAN = qolgan hammasi.
+  //
+  // Tugagan xonadondagi odam yo kiritilgan, yo allaqachon ro'yxatda
+  // bo'lgan. Ikkinchisida bizda yozuv yo'q (so'rov yuborilmagan),
+  // shuning uchun uni ayirma bilan olamiz — aks holda platformada
+  // turgan ~460 kishi hech qaysi ustunga tushmay qolardi.
+  const added = Math.max(0, peopleTotal - failed - pending);
 
   return {
     peopleTotal,
-    // "Ro'yxatga olingan" ichiga allaqachon ro'yxatda turganlar ham
-    // kiradi: mahalla xodimi uchun natija bir xil — odam bazada bor.
     added,
     failed,
     pending,
