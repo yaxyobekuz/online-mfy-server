@@ -384,6 +384,42 @@ const verifyCitizen = async (citizen, run) => {
     return { skip: "Tug'ilgan sana noto'g'ri yoki yo'q" };
   }
 
+  // JSHSHIR bor — davlat bazasiga MUROJAAT QILMAYMIZ.
+  //
+  // Nega: GCP ko'pincha "status_name = aktiv, doc_status = Yaroqsiz
+  // hujjat" deb javob beradi — ya'ni odam faol, faqat GCP'dagi
+  // hujjat yozuvi eskirgan (yangi pasport olgan, GCP yangilamagan).
+  // Avval bunday odam chetga chiqarilardi, lekin qo'lda sinab
+  // ko'rilganda platforma ularni MUAMMOSIZ qabul qildi (11/11
+  // HTTP 201). Ya'ni platforma hujjat raqamini tekshirmaydi —
+  // JSHSHIR, ism va sana yetarli.
+  //
+  // Natijada: bazadagi ma'lumot to'g'ridan-to'g'ri yuboriladi,
+  // so'rovlar soni ikki barobar kamayadi va ~76 kishi bekorga
+  // chetda qolmaydi.
+  //
+  // Diqqat: ism BAZADAGI LOTIN ustunidan olinadi (`fullName`),
+  // kirill emas — platforma lotin kutadi.
+  if (citizen.pinfl) {
+    const { series, number } = documentParts(citizen);
+
+    return {
+      verified: {
+        fullName: citizen.fullName,
+        birthDate: isoBirthDate,
+        pinfl: String(citizen.pinfl),
+        docSeries: series,
+        docNumber: number,
+        // Hujjat turi seriyaga qarab: guvohnoma yoki pasport.
+        documentType: isBirthCertificate(series)
+          ? "Tug'ilganlik guvohnomasi"
+          : "Passport",
+        via: "baza",
+      },
+      registryResponse: null,
+    };
+  }
+
   let pinfl = citizen.pinfl ? String(citizen.pinfl) : null;
   let cert = null;
   let passport = null;
@@ -467,7 +503,45 @@ const verifyCitizen = async (citizen, run) => {
     }
   }
 
-  // 2-bosqich: JSHSHIR ma'lum — pasport bazasidan so'raymiz.
+  // 2-bosqich: JSHSHIR shu yerda FHDYO yoki MIP javobidan topilgan
+  // (manbada yo'q edi). Ularning ikkisi ham RASMIY baza, ya'ni ism
+  // va sana allaqachon tasdiqlangan — GCP'ga qayta murojaat qilish
+  // shart emas.
+  //
+  // Guvohnoma topilgan bo'lsa — o'shani ishlatamiz.
+  if (cert) {
+    return {
+      verified: {
+        fullName: cert.fullName,
+        birthDate: cert.birthDate,
+        pinfl: cert.pinfl,
+        docSeries: cert.docSeries,
+        docNumber: cert.docNumber,
+        documentType: cert.documentType,
+        via: "fhdyo",
+      },
+      registryResponse: cert.response,
+    };
+  }
+
+  // Pasport bazasidan (MIP) topilgan bo'lsa — o'shani.
+  if (passport) {
+    return {
+      verified: {
+        fullName: passport.fullName,
+        birthDate: passport.birthDate,
+        pinfl: passport.pinfl,
+        docSeries: passport.docSeries,
+        docNumber: passport.docNumber,
+        documentType: passport.documentType,
+        via: "mip",
+      },
+      registryResponse: passport.response,
+    };
+  }
+
+  // Bu yergacha yetib kelish kutilmaydi (JSHSHIR qayerdandir
+  // topilgan bo'lishi kerak), lekin ehtiyot uchun GCP qoladi.
   const gcpData = await fetchGcp(pinfl, isoBirthDate, run);
 
   if (gcpData?.code === 0) {
