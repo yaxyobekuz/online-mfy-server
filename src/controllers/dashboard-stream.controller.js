@@ -1,11 +1,10 @@
-import RegistrationRun from "../models/RegistrationRun.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { getRateLimitState } from "../utils/rate-limit.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
 import { isRunActiveAnywhere } from "../services/registration-worker.js";
-import { collectStats } from "./dashboard.controller.js";
+import { collectStats, pickVisibleRun } from "./dashboard.controller.js";
 
 /**
  * Asosiy sahifaning jonli oqimi (SSE — Server-Sent Events).
@@ -51,9 +50,7 @@ export const streamDashboard = async (req, res) => {
   let previous = null;
 
   const collect = async () => {
-    const run = await RegistrationRun.findOne({ userUid: user.uid })
-      .sort({ createdAt: -1 })
-      .lean();
+    const run = await pickVisibleRun(user.uid);
 
     if (!run) return { run: null, stats: null, members: [], currentHome: null };
 

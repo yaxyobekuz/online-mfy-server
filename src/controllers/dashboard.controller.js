@@ -50,6 +50,33 @@ const requireUser = (res) => {
 };
 
 /**
+ * Panelda qaysi yurish ko'rsatiladi.
+ *
+ * Endi bir foydalanuvchida ikki xil yurish bo'lishi mumkin: kadastr
+ * bo'yicha (asosiy) va random. Agar oddiygina "eng so'nggisi" olinsa,
+ * bir marta random boshlangandan keyin kadastr yurishining natijasi
+ * (masalan 1411 ta kiritilgan odam) paneldan butunlay yo'qolardi —
+ * chunki random yurish hujjati har doim yangiroq bo'ladi.
+ *
+ * Qoida: hozir ishlayotgan yurish ko'rsatiladi; ishlayotgani
+ * bo'lmasa — eng so'nggi KADASTR yurishi; u ham bo'lmasa — nima
+ * bo'lsa o'shanisi.
+ */
+export const pickVisibleRun = async (uid) => {
+  const runs = await RegistrationRun.find({ userUid: uid })
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .lean();
+
+  if (!runs.length) return null;
+
+  const active = runs.find((run) => isRunActiveAnywhere(run));
+  if (active) return active;
+
+  return runs.find((run) => !run.randomMode) ?? runs[0];
+};
+
+/**
  * Shu token egasining MFY si.
  *
  * Token faqat o'z hududiga kirish beradi, shuning uchun MFY ni
@@ -59,7 +86,16 @@ const requireUser = (res) => {
  */
 const resolveMahalla = async (user) => {
   // 1. Oldingi yurish bo'lsa — eng ishonchli manba.
-  const previous = await RegistrationRun.findOne({ userUid: user.uid })
+  //
+  // Random yurishlar hisobga olinmaydi: ularda mahalla aniqlanmasa
+  // "random" kaliti yozilib qolishi mumkin, u esa bu yerga tushsa
+  // kadastr yurishi boshqa mahallaga tegishlidek ko'rinardi va
+  // "Boshlash" tugagan ishni topa olmay noldan yangi yurish
+  // yaratardi.
+  const previous = await RegistrationRun.findOne({
+    userUid: user.uid,
+    randomMode: { $ne: true },
+  })
     .sort({ createdAt: -1 })
     .select("mahallaKey mahallaName")
     .lean();
@@ -278,10 +314,8 @@ export const getDashboard = async (req, res) => {
   try {
     const mahalla = await resolveMahalla(user);
 
-    // Shu tokenga tegishli eng so'nggi yurish.
-    const run = await RegistrationRun.findOne({ userUid: user.uid })
-      .sort({ createdAt: -1 })
-      .lean();
+    // Shu tokenga tegishli ko'rsatiladigan yurish.
+    const run = await pickVisibleRun(user.uid);
 
     const [stats, members, currentHome] = await Promise.all([
       collectStats(run, user.uid),
@@ -395,9 +429,16 @@ export const controlDashboard = async (req, res) => {
       //
       // Bitta mahallaga bitta yurish — hisobot ham, panel ham shu
       // qoidaga tayanadi.
+      //
+      // Random yurishlar bu qidiruvga KIRMAYDI. "Boshlash" — bu
+      // kadastr bo'yicha yurish. Random alohida tugma bilan
+      // boshlanadi va alohida yurish hujjatida yashaydi; uni bu
+      // yerda ilib olish tugagan kadastr ishini qaytadan random
+      // rejimga burib yuborardi.
       const resumable = await RegistrationRun.findOne({
         userUid: user.uid,
         mahallaKey: mahalla.key,
+        randomMode: { $ne: true },
       })
         .select("+token")
         .sort({ createdAt: -1 });
@@ -478,10 +519,12 @@ export const controlDashboard = async (req, res) => {
       return res.status(202).json({ message: "Jarayon boshlandi" });
     }
 
-    // pause / stop
-    const run = await RegistrationRun.findOne({ userUid: user.uid })
-      .sort({ createdAt: -1 })
-      .select("+token");
+    // pause / stop — panelda ko'rinib turgan yurish to'xtatiladi,
+    // ya'ni aynan foydalanuvchi kuzatayotgani (kadastr yoki random).
+    const visible = await pickVisibleRun(user.uid);
+    const run = visible
+      ? await RegistrationRun.findById(visible._id).select("+token")
+      : null;
 
     if (!run) return res.status(404).json({ message: "Jarayon topilmadi" });
 
@@ -526,15 +569,24 @@ export const randomStart = async (req, res) => {
   try {
     const token = getRequestToken();
 
-    // Allaqachon faol random yurish bormi?
-    const existing = await RegistrationRun.findOne({
+    // Allaqachon ishlayotgan yurish bormi?
+    //
+    // Random ham, kadastr ham tekshiriladi: ikkalasi bir vaqtda
+    // ketsa tashqi API limitini bo'lishib olishardi va ikkalasi ham
+    // sekinlashardi.
+    const running = await RegistrationRun.find({
       userUid: user.uid,
-      randomMode: true,
       status: { $in: ["pending", "preparing", "running"] },
-    });
+    }).limit(10);
 
-    if (existing && isRunActiveAnywhere(existing)) {
-      return res.status(200).json({ message: "Random jarayon allaqachon ketmoqda" });
+    const active = running.find((run) => isRunActiveAnywhere(run));
+
+    if (active) {
+      return res.status(200).json({
+        message: active.randomMode
+          ? "Random jarayon allaqachon ketmoqda"
+          : "Avval joriy jarayonni to'xtating",
+      });
     }
 
     // Xonadon topish: platformadan birinchi ko'chaning birinchi
