@@ -352,15 +352,24 @@ export const controlDashboard = async (req, res) => {
         });
       }
 
-      // Tugallanmagan yurish bo'lsa, o'shani davom ettiramiz.
-      // Yangisini yaratish bir xonadonni ikki marta ishlashga olib
-      // kelardi — platformada dublikat urinish paydo bo'lardi.
+      // SHU MAHALLA uchun yurish bo'lsa, o'shani davom ettiramiz.
+      //
+      // Diqqat: `done` ham qidiruvga KIRADI. Avval kirmasdi va
+      // natijada tugagan yurishdan keyin "Boshlash" bosilsa, yangi
+      // BO'SH yurish yaratilardi. Panel esa faqat eng so'nggi
+      // yurishni ko'rsatadi — shuning uchun oldingi ishning
+      // natijasi (masalan 855 kiritilgan odam) ko'rinmay qolardi va
+      // hammasi noldan boshlangandek tuyulardi.
+      //
+      // Qayta ishlash xavfsiz: ishchi allaqachon ro'yxatda
+      // turganlarni `takenPinfls` orqali o'tkazib yuboradi, ya'ni
+      // platformada dublikat paydo bo'lmaydi.
+      //
+      // Bitta mahallaga bitta yurish — hisobot ham, panel ham shu
+      // qoidaga tayanadi.
       const resumable = await RegistrationRun.findOne({
         userUid: user.uid,
         mahallaKey: mahalla.key,
-        status: {
-          $in: ["pending", "preparing", "running", "paused", "stopped"],
-        },
       })
         .select("+token")
         .sort({ createdAt: -1 });
@@ -370,6 +379,38 @@ export const controlDashboard = async (req, res) => {
           return res
             .status(200)
             .json({ message: "Jarayon allaqachon ketmoqda" });
+        }
+
+        // Yurish allaqachon tugagan bo'lsa, "Boshlash" — bu qayta
+        // urinish. Navbatda `pending` xonadon qolmagani uchun ishchi
+        // darhol chiqib ketardi, shuning uchun VAQTINCHALIK sabab
+        // bilan chetda qolgan xonadonlarni navbatga qaytaramiz.
+        //
+        // Faqat vaqtinchalik sabablar: tashqi server xatosi va
+        // tarmoq uzilishi. Qolganlari (vafot etgan, boshqa xonadon
+        // egasi, hujjat nuqsoni) qayta urinishdan o'zgarmaydi —
+        // ularni qaytarish rate-limit ni bekorga sarflardi.
+        let requeued = 0;
+
+        if (resumable.status === "done") {
+          const retryable = await RegistrationMember.distinct("homeRowId", {
+            runId: resumable._id,
+            reasonCode: { $in: ["server_xatosi", "tarmoq"] },
+          });
+
+          if (retryable.length) {
+            const result = await RegistrationHome.updateMany(
+              { _id: { $in: retryable }, runId: resumable._id },
+              { $set: { status: "pending" } },
+            );
+            requeued = result.modifiedCount;
+          }
+
+          if (!requeued) {
+            return res.status(200).json({
+              message: "Bu mahalla bo'yicha qayta urinadigan yozuv qolmadi",
+            });
+          }
         }
 
         resumable.control = "run";
@@ -383,7 +424,11 @@ export const controlDashboard = async (req, res) => {
 
         runRegistration(user, resumable, resumable.token);
 
-        return res.status(202).json({ message: "Davom ettirildi" });
+        return res.status(202).json({
+          message: requeued
+            ? `${requeued} ta xonadon qayta urinish uchun navbatga qaytarildi`
+            : "Davom ettirildi",
+        });
       }
 
       const run = await RegistrationRun.create({
