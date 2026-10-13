@@ -11,6 +11,13 @@ const TOKEN = fs.readFileSync("../agent-lab/.token", "utf8").trim();
 const STUCK_MS = 300000;
 const TICK_MS = 60000;
 
+// Tiklanmaydigan mahallalar — vergul bilan ajratilgan kalitlar.
+// Masalan: WATCH_SKIP=NASRIDDINOBOD
+const SKIP = String(process.env.WATCH_SKIP ?? "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
+
 const t = () => new Date().toLocaleTimeString("uz-UZ", { hour12: false });
 
 const resume = async (runId, name) => {
@@ -52,12 +59,26 @@ for (;;) {
       `${String(run.mahallaName).slice(0, 8)} ${run.homesDone}/${run.homesTotal} +${run.membersAdded}`,
     );
 
-    if (run.status === "done" || run.status === "stopped") continue;
+    // Qo'lda to'xtatilgan yurishlarga tegmaymiz: ular boshqa
+    // serverga berilgan bo'lishi mumkin (masalan NASRIDDINOBOD
+    // ikkinchi laptopda ishlaydi). SKIP ro'yxatini muhit
+    // o'zgaruvchisi orqali berish mumkin.
+    if (SKIP.includes(run.mahallaKey)) continue;
+
+    if (
+      run.status === "done" ||
+      run.status === "stopped" ||
+      run.status === "paused"
+    ) {
+      continue;
+    }
     allDone = false;
 
+    // Faqat HAQIQATAN uzilganlar tiklanadi: xato bergan yoki
+    // "running" deb turgani holda javob bermay qolgan. Qo'lda
+    // pauza qilinganiga tegilmaydi (yuqorida chetlab o'tilgan).
     const stalled =
       run.status === "error" ||
-      run.status === "paused" ||
       (run.status === "running" && beat != null && beat > STUCK_MS);
 
     if (stalled) {
