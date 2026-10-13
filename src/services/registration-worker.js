@@ -166,6 +166,24 @@ export const describeError = (err) => {
   }
 };
 
+/**
+ * Xato MongoDB bilan aloqa uzilishimi?
+ *
+ * Nega kerak: soatlab ketadigan yurish bir lahzalik tarmoq uzilishi
+ * tufayli butunlay yo'qolmasligi kerak. Bunday xatoda kutib qayta
+ * urinamiz, boshqa xatolarda esa yurish to'xtaydi.
+ */
+const isMongoNetworkError = (err) => {
+  const name = err?.name ?? "";
+  const code = err?.code ?? err?.cause?.code ?? "";
+
+  return (
+    /MongoNetworkError|MongoNotConnectedError|MongoServerSelectionError|MongoTopologyClosedError/.test(
+      name,
+    ) || ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "ECONNREFUSED", "EPIPE"].includes(code)
+  );
+};
+
 // Rate-limit kutishini yurish holatiga yozadi — client "N soniya
 // kutilmoqda" deb ko'rsatadi.
 const waitReporter = (run) => (until) => {
@@ -1693,7 +1711,13 @@ const runRandomWorker = async (user, runDoc) => {
       message: `Bazada ${totalCitizens} fuqaro — random tanlash boshlanmoqda`,
     });
 
-    let added = 0;
+    // Hisoblagich NOLDAN emas, oldingi natijadan davom etadi.
+    //
+    // Nega: yurish uzilib (tarmoq, server qayta ishga tushishi)
+    // keyin qayta boshlansa, allaqachon qo'shilganlar yo'qolmasligi
+    // kerak edi — aks holda panel 503 o'rniga 35 ko'rsatardi va
+    // ishchi maqsaddan ancha oshib ketardi.
+    let added = fresh.randomAdded ?? 0;
     let failed = 0;
     let skipped = 0;
     let attempted = 0;
@@ -1720,11 +1744,12 @@ const runRandomWorker = async (user, runDoc) => {
       cadasterNumber: "random",
     };
 
-    // Platformada bitta xonadonga ko'pi bilan 20 ta a'zo kiritiladi
-    // ("хонадонга 20 тадан зиёд оила азоси киритиш мумкин эмас").
-    // Shuning uchun hozirgi a'zolar sanab boriladi va limitga
-    // yetganda keyingi xonadonga o'tiladi.
-    const HOME_MEMBER_LIMIT = 20;
+    // Platformada bitta xonadonga cheklangan sondagi a'zo kiritiladi
+    // ("хонадонга N тадан зиёд оила азоси киритиш мумкин эмас").
+    // N xonadonga qarab 15 yoki 20 bo'lishi aniqlandi, shuning
+    // uchun ehtiyotkor qiymat olinadi: 15 dan oshsa ham, platforma
+    // rad etgan zahoti xonadon to'lgan deb belgilanadi (pastda).
+    const HOME_MEMBER_LIMIT = 15;
     let membersInHome = existing.length;
 
     pushRunLog(run._id, {
@@ -1798,7 +1823,15 @@ const runRandomWorker = async (user, runDoc) => {
       return false;
     };
 
+    // Mongo bilan aloqa bir lahzaga uzilsa (ECONNRESET, ETIMEDOUT)
+    // soatlab ketgan ish butunlay yo'qolmasligi kerak. Shuning
+    // uchun har bir aylanish shu o'ramda ketadi: uzilish bo'lsa
+    // kutib, qaytadan urinamiz.
+    let dbFailures = 0;
+    const MAX_DB_FAILURES = 10;
+
     while (added < target) {
+      try {
       const control = await readControl(run);
       if (control !== "run") {
         const status = control === "pause" ? "paused" : "stopped";
@@ -1961,7 +1994,10 @@ const runRandomWorker = async (user, runDoc) => {
           .sort({ createdAt: -1 })
           .lean();
 
-        if (/20\s*тадан|20\s*tadan/i.test(last?.reason ?? "")) {
+        // Diqqat: limit har doim 20 emas. Platforma xonadon turiga
+        // qarab boshqa son ham aytadi ("15 тадан зиёд"). Shuning
+        // uchun aniq songa emas, XABARNING O'ZIGA qaraymiz.
+        if (/зиёд оила азоси|ziyod oila a[’'`]?zosi/i.test(last?.reason ?? "")) {
           membersInHome = HOME_MEMBER_LIMIT;
           // Bu fuqaroning aybi yo'q — keyingi xonadonda qayta
           // urinib ko'rilsin.
@@ -1970,6 +2006,28 @@ const runRandomWorker = async (user, runDoc) => {
       } else {
         skipped += 1;
         consecutiveMisses += 1;
+      }
+
+        dbFailures = 0;
+      } catch (err) {
+        // Faqat BAZA uzilishi qayta urinishga arziydi. Boshqa
+        // xatolar yuqoriga chiqadi va yurish "error" bo'ladi.
+        if (!isMongoNetworkError(err)) throw err;
+
+        dbFailures += 1;
+
+        if (dbFailures >= MAX_DB_FAILURES) {
+          throw new Error(
+            `Baza bilan aloqa ${MAX_DB_FAILURES} marta uzildi: ${err.message}`,
+          );
+        }
+
+        pushRunLog(run._id, {
+          level: "wait",
+          message: `Baza bilan aloqa uzildi (${dbFailures}/${MAX_DB_FAILURES}) — 10 soniyadan keyin qayta urinamiz`,
+        });
+
+        await pause(10000);
       }
     }
 

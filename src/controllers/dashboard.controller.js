@@ -648,11 +648,12 @@ export const randomStart = async (req, res) => {
       // platforma bo'sh ro'yxat qaytaradi (tekshirildi: 0 ta).
       // Qiymati 0 yoki 1 bo'lishidan qat'i nazar bir xil xonadonlar
       // keladi, shuning uchun 0 qoldirilgan.
-      // Platformada bitta xonadonga ko'pi bilan 20 ta a'zo sig'adi.
-      // Birinchi uchragan xonadon odatda to'la bo'ladi, shuning
-      // uchun bo'sh joyi borini qidiramiz — aks holda hamma so'rov
-      // "20 tadan ziyod" deb rad etilardi.
-      const HOME_MEMBER_LIMIT = 20;
+      // Platformada bitta xonadonga cheklangan sondagi a'zo sig'adi
+      // (xonadonga qarab 15 yoki 20). Birinchi uchragan xonadon
+      // odatda to'la bo'ladi, shuning uchun bo'sh joyi borini
+      // qidiramiz — aks holda hamma so'rov "N tadan ziyod" deb rad
+      // etilardi.
+      const HOME_MEMBER_LIMIT = 15;
 
       // Nechta xonadonni tekshiramiz: har biri 2 ta so'rov, ya'ni
       // rate-limit bilan uzoq kutish. Bittasi topilsa yetarli —
