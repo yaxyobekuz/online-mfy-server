@@ -89,6 +89,9 @@ export const streamDashboard = async (req, res) => {
         isStale: run.status === "running" && !isActive,
         waitingUntil: run.waitingUntil ?? null,
         error: run.error ?? null,
+        randomMode: run.randomMode ?? false,
+        randomTarget: run.randomTarget ?? 0,
+        randomAdded: run.randomAdded ?? 0,
       },
       stats,
       currentHome: currentHome

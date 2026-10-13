@@ -27,6 +27,7 @@
  * paydo bo'lmaydi.
  */
 
+import mongoose from "mongoose";
 import api from "../config/api.js";
 import Citizen from "../models/Citizen.js";
 import Street from "../models/Street.js";
@@ -1563,6 +1564,308 @@ const prepareQueue = async (user, run) => {
 // Yurishni olib borish
 // ---------------------------------------------------------------
 
+// ---------------------------------------------------------------
+// Random rejim — ixtiyoriy fuqarolarni bitta oilaga qo'shish
+// ---------------------------------------------------------------
+
+/**
+ * Random rejimda MFY dagi fuqarolardan tasodifiy tanlab, bitta
+ * xonadonga oila a'zosi sifatida qo'shadi. Maqsad songa yetguncha
+ * davom etadi.
+ *
+ * Farqi oddiy rejimdan:
+ *   - Kadastr bo'yicha moslashtirish YO'Q — fuqaro RANDOM tanlanadi
+ *   - Bitta xonadon — modal orqali tanlangan yoki birinchi xonadon
+ *   - Maqsad soni — "N ta muvaffaqiyatli qo'shish" gacha ishlaydi
+ */
+const runRandomWorker = async (user, runDoc) => {
+  const runId = String(runDoc._id);
+  const run = runDoc;
+
+  try {
+    const fresh = await RegistrationRun.findById(run._id)
+      .select("+token")
+      .lean();
+
+    const target = fresh.randomTarget ?? 0;
+    if (target <= 0) throw new Error("Maqsad soni noto'g'ri");
+
+    const homeId = fresh.randomHomeId;
+    const streetId = fresh.randomStreetId;
+    const surveyUuid = fresh.randomSurveyUuid;
+    const ownerPinfl = fresh.randomOwnerPinfl;
+
+    if (!homeId || !streetId || !surveyUuid) {
+      throw new Error("Xonadon ma'lumotlari to'liq emas — homeId, streetId yoki surveyUuid yo'q");
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "running",
+          error: null,
+          stage: "Random rejim — fuqarolar tanlanmoqda",
+          heartbeatAt: new Date(),
+          startedAt: run.startedAt ?? new Date(),
+        },
+      },
+    );
+
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Random rejim boshlandi — maqsad: ${target} ta muvaffaqiyatli qo'shish`,
+    });
+
+    // Platformada hozir kim bor — ularni qayta yubormaymiz.
+    let existing = [];
+    try {
+      existing = await fetchFamilyMembers(user, streetId, surveyUuid, run);
+    } catch (err) {
+      pushRunLog(run._id, {
+        level: "error",
+        message: `Oila a'zolari yuklanmadi: ${describeError(err)}`,
+      });
+    }
+
+    const knownPinfls = new Set();
+    for (const person of existing) {
+      if (person.pinfl) knownPinfls.add(String(person.pinfl));
+    }
+    if (ownerPinfl) knownPinfls.add(String(ownerPinfl));
+
+    // Oldingi yurishlarda qo'shilgan yoki rad etilgan JSHSHIR'lar.
+    const occupied = [
+      { userUid: user.uid, status: { $in: ["added", "exists"] } },
+      {
+        userUid: user.uid,
+        reasonCode: { $in: ["boshqa_xonadon_egasi", "boshqa_xonadon_azosi"] },
+      },
+    ];
+
+    for (const filter of occupied) {
+      for (const field of ["pinfl", "verifiedPinfl"]) {
+        for (const pinfl of await RegistrationMember.distinct(field, filter)) {
+          if (pinfl) knownPinfls.add(String(pinfl));
+        }
+      }
+    }
+
+    const hopelessPinfls = new Map();
+    for (const row of await RegistrationMember.find(
+      {
+        userUid: user.uid,
+        reasonCode: { $in: ["vafot_etgan", "hujjat_yaroqsiz"] },
+        pinfl: { $nin: [null, ""] },
+      },
+      "pinfl reason",
+    ).lean()) {
+      hopelessPinfls.set(String(row.pinfl), row.reason);
+    }
+
+    const certPinfls = new Map();
+    for (const row of await RegistrationMember.find(
+      {
+        userUid: user.uid,
+        pinfl: { $in: [null, ""] },
+        verifiedPinfl: { $nin: [null, ""] },
+      },
+      "document birthDate verifiedPinfl",
+    ).lean()) {
+      const key = certCacheKey(row);
+      if (key) certPinfls.set(key, String(row.verifiedPinfl));
+    }
+
+    // MFY ga tegishli barcha fuqarolar sonini olamiz.
+    const totalCitizens = await Citizen.countDocuments();
+    if (!totalCitizens) throw new Error("Fuqarolar bazasi bo'sh");
+
+    let added = 0;
+    let failed = 0;
+    let skipped = 0;
+    let attempted = 0;
+    // Xuddi shu fuqarolarni qayta tanlashni oldini olish.
+    const triedCitizenIds = new Set();
+    // Ketma-ket muvaffaqiyatsiz urinishlar soni — barchasi
+    // urinib ko'rilgan bo'lsa cheksiz aylanishning oldini oladi.
+    let consecutiveMisses = 0;
+    const MAX_CONSECUTIVE_MISSES = 100;
+
+    // Virtual homeRow — random rejimda bitta xonadon ishlatiladi.
+    const homeRow = {
+      _id: run._id,
+      homeId,
+      streetId,
+      surveyUuid,
+      ownerPinfl,
+      cadasterNumber: "random",
+    };
+
+    while (added < target) {
+      const control = await readControl(run);
+      if (control !== "run") {
+        const status = control === "pause" ? "paused" : "stopped";
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          {
+            $set: {
+              status,
+              stage: control === "pause" ? "To'xtatib turildi" : "To'xtatildi",
+              waitingUntil: null,
+              finishedAt: control === "stop" ? new Date() : null,
+            },
+          },
+        );
+        pushRunLog(run._id, {
+          level: "info",
+          message: control === "pause" ? "Jarayon to'xtatib turildi" : "Jarayon to'xtatildi",
+        });
+        return;
+      }
+
+      if (consecutiveMisses >= MAX_CONSECUTIVE_MISSES) {
+        pushRunLog(run._id, {
+          level: "info",
+          message: `Ketma-ket ${MAX_CONSECUTIVE_MISSES} urinish muvaffaqiyatsiz — mos fuqaro qolmagan bo'lishi mumkin`,
+        });
+        break;
+      }
+
+      if (triedCitizenIds.size >= totalCitizens) {
+        pushRunLog(run._id, {
+          level: "info",
+          message: "Barcha fuqarolar urinib ko'rildi",
+        });
+        break;
+      }
+
+      // Random fuqaro tanlash — MongoDB $sample.
+      const [citizen] = await Citizen.aggregate([
+        { $match: { _id: { $nin: [...triedCitizenIds].map((id) => new mongoose.Types.ObjectId(id)) } } },
+        { $sample: { size: 1 } },
+      ]);
+
+      if (!citizen) {
+        pushRunLog(run._id, {
+          level: "info",
+          message: "Boshqa fuqaro qolmadi",
+        });
+        break;
+      }
+
+      triedCitizenIds.add(String(citizen._id));
+      attempted += 1;
+
+      // JSHSHIR allaqachon ro'yxatda bo'lsa — o'tkazamiz.
+      const sourcePinfl = citizen.pinfl ? String(citizen.pinfl) : null;
+      if (sourcePinfl && knownPinfls.has(sourcePinfl)) {
+        consecutiveMisses += 1;
+        skipped += 1;
+        continue;
+      }
+
+      // "O'zgarmas" sababli chetda qolgan bo'lsa — o'tkazamiz.
+      if (sourcePinfl && hopelessPinfls.has(sourcePinfl)) {
+        consecutiveMisses += 1;
+        skipped += 1;
+        continue;
+      }
+
+      await RegistrationRun.updateOne(
+        { _id: run._id },
+        {
+          $set: {
+            stage: `Random: ${added}/${target} kiritildi (${attempted} urinish)`,
+            heartbeatAt: new Date(),
+          },
+        },
+      );
+
+      const result = await registerOneMember(
+        user,
+        run,
+        homeRow,
+        citizen,
+        knownPinfls,
+        knownPinfls,
+        hopelessPinfls,
+        certPinfls,
+      );
+
+      if (result === "added") {
+        added += 1;
+        consecutiveMisses = 0;
+
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          {
+            $set: {
+              randomAdded: added,
+              membersAdded: added,
+              membersTotal: attempted,
+              heartbeatAt: new Date(),
+            },
+          },
+        );
+      } else if (result === "failed") {
+        failed += 1;
+        consecutiveMisses += 1;
+      } else {
+        skipped += 1;
+        consecutiveMisses += 1;
+      }
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "done",
+          stage: `Tugadi — ${added}/${target}`,
+          randomAdded: added,
+          membersAdded: added,
+          membersFailed: failed,
+          membersSkipped: skipped,
+          membersTotal: attempted,
+          waitingUntil: null,
+          finishedAt: new Date(),
+        },
+      },
+    );
+
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Random rejim tugadi — ${added}/${target} muvaffaqiyatli, ${failed} xato, ${skipped} o'tkazildi (${attempted} urinish)`,
+    });
+  } catch (err) {
+    console.error("[Random ro'yxatga olish] xatolik:", err);
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "error",
+          error: err.message || "Noma'lum xatolik",
+          stage: "Xatolik",
+          waitingUntil: null,
+          finishedAt: new Date(),
+        },
+      },
+    );
+
+    pushRunLog(run._id, {
+      level: "error",
+      message: `Random rejim to'xtadi: ${err.message}`,
+    });
+  } finally {
+    activeRuns.delete(runId);
+    await RegistrationRun.updateOne(
+      { _id: run._id, ownerId: SERVER_ID },
+      { $set: { ownerId: null, ownerName: null } },
+    ).catch(() => {});
+  }
+};
+
 /**
  * Yurishni boshlaydi yoki davom ettiradi. Chaqiruvchi KUTMAYDI:
  * javob darhol qaytariladi, jarayon fonda davom etadi.
@@ -1619,7 +1922,8 @@ export const runRegistration = async (user, runDoc, token) => {
   // tayanmaymiz: bu yerda ataylab yangi kontekst ochiladi, shunda
   // yurish server qayta ishga tushgandan keyin ham (saqlangan token
   // bilan) davom eta oladi.
-  return requestContext.run({ token, user }, () => runWorker(user, runDoc));
+  const worker = runDoc.randomMode ? runRandomWorker : runWorker;
+  return requestContext.run({ token, user }, () => worker(user, runDoc));
 };
 
 const runWorker = async (user, runDoc) => {

@@ -114,6 +114,20 @@ const registrationRunSchema = new Schema(
     oblId: { type: Number },
     areaId: { type: Number },
     districtId: { type: Number },
+
+    // --- Random rejim ---
+    // Oddiy rejimda fuqarolar kadastr bo'yicha xonadonga moslashadi.
+    // Random rejimda esa MFY dagi ixtiyoriy fuqarolar tanlanib,
+    // bitta xonadonga oila a'zosi sifatida qo'shiladi — toki maqsad
+    // songa yetguncha.
+    randomMode: { type: Boolean, default: false },
+    randomTarget: { type: Number, default: 0 },
+    randomAdded: { type: Number, default: 0 },
+    // Random rejimda fuqarolar qaysi xonadonga qo'shiladi.
+    randomHomeId: { type: String },
+    randomStreetId: { type: String },
+    randomSurveyUuid: { type: String },
+    randomOwnerPinfl: { type: String },
   },
   { timestamps: true },
 );

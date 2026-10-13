@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import api from "../config/api.js";
 import Citizen from "../models/Citizen.js";
 import Home from "../models/Home.js";
 import RegistrationRun from "../models/RegistrationRun.js";
@@ -326,6 +327,9 @@ export const getDashboard = async (req, res) => {
             owner: runOwner(run)?.name ?? null,
             waitingUntil: run.waitingUntil ?? null,
             error: run.error ?? null,
+            randomMode: run.randomMode ?? false,
+            randomTarget: run.randomTarget ?? 0,
+            randomAdded: run.randomAdded ?? 0,
           }
         : null,
       stats,
@@ -495,6 +499,167 @@ export const controlDashboard = async (req, res) => {
 
     return res.status(200).json({
       message: action === "pause" ? "To'xtatib turildi" : "To'xtatildi",
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Server xatoligi" });
+  }
+};
+
+/**
+ * POST /api/dashboard/random-start  { target: number, homeId?: string }
+ *
+ * Random rejimda bitta xonadonga MFY dagi ixtiyoriy fuqarolarni
+ * qo'shadi. `target` — nechta muvaffaqiyatli qo'shish kerak.
+ *
+ * Xonadon platformadan topiladi: birinchi ko'chaning birinchi
+ * xonadoni olinadi (yoki `homeId` berilsa o'sha).
+ */
+export const randomStart = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  const target = Number(req.body?.target);
+  if (!Number.isFinite(target) || target < 1 || target > 50000) {
+    return res.status(400).json({ message: "Maqsad soni 1 dan 50000 gacha bo'lishi kerak" });
+  }
+
+  try {
+    const token = getRequestToken();
+
+    // Allaqachon faol random yurish bormi?
+    const existing = await RegistrationRun.findOne({
+      userUid: user.uid,
+      randomMode: true,
+      status: { $in: ["pending", "preparing", "running"] },
+    });
+
+    if (existing && isRunActiveAnywhere(existing)) {
+      return res.status(200).json({ message: "Random jarayon allaqachon ketmoqda" });
+    }
+
+    // Xonadon topish: platformadan birinchi ko'chaning birinchi
+    // xonadonini olamiz — oila a'zolarini o'shanga qo'shamiz.
+    const requestedHomeId = req.body?.homeId ? String(req.body.homeId) : null;
+
+    let homeId = requestedHomeId;
+    let streetId = null;
+    let surveyUuid = null;
+    let ownerPinfl = null;
+
+    if (homeId) {
+      // Berilgan homeId dan formani yuklaymiz.
+      const formResponse = await api.get(`/web/v1/forms/survey_homes/${homeId}`, {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+        },
+      });
+
+      const formData = formResponse.formData ?? null;
+      if (!formData?.survey_uuid) {
+        return res.status(400).json({ message: "Xonadon formasi yuklanmadi yoki survey_uuid yo'q" });
+      }
+
+      surveyUuid = formData.survey_uuid;
+      ownerPinfl = formData.pinfl ? String(formData.pinfl) : null;
+
+      // streetId ni Home kolleksiyasidan yoki RegistrationHome dan topamiz.
+      const home = await Home.findOne({ homeId, userUid: user.uid }).lean();
+      streetId = home?.streetId ?? null;
+
+      if (!streetId) {
+        const regHome = await RegistrationHome.findOne({ homeId }).lean();
+        streetId = regHome?.streetId ?? null;
+      }
+
+      if (!streetId) {
+        return res.status(400).json({ message: "Ko'cha (streetId) aniqlanmadi — xonadon topilmadi" });
+      }
+    } else {
+      // Avtomatik tanlash: birinchi ko'chadan birinchi xonadon.
+      const streets = await api.get("/api/v1/survey_homes/cache/street", {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+        },
+      }).then((r) => r.data?.results ?? []);
+
+      if (!streets.length) {
+        return res.status(404).json({ message: "Ko'chalar topilmadi" });
+      }
+
+      // Xonadon bor ko'chani topamiz.
+      for (const street of streets) {
+        const homesResponse = await api.get("/api/v1/survey_homes_street/cache/data", {
+          params: {
+            obl_id: user.oblId,
+            area_id: user.areaId,
+            district_id: user.districtId,
+            street_id: String(street.id),
+            surveyed: 0,
+            page: 1,
+            size: 1,
+          },
+        });
+
+        const homes = homesResponse.data?.results ?? [];
+        if (homes.length) {
+          homeId = String(homes[0].id);
+          streetId = String(street.id);
+          break;
+        }
+      }
+
+      if (!homeId || !streetId) {
+        return res.status(404).json({ message: "Xonadon topilmadi — ko'chalarda xonadon yo'q" });
+      }
+
+      // Tanlangan xonadon formasi — survey_uuid olish.
+      const formResponse = await api.get(`/web/v1/forms/survey_homes/${homeId}`, {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+        },
+      });
+
+      const formData = formResponse.formData ?? null;
+      if (!formData?.survey_uuid) {
+        return res.status(400).json({ message: "Xonadon formasi yuklanmadi yoki survey_uuid yo'q" });
+      }
+
+      surveyUuid = formData.survey_uuid;
+      ownerPinfl = formData.pinfl ? String(formData.pinfl) : null;
+    }
+
+    // Mahalla nomini aniqlash.
+    const mahalla = await resolveMahalla(user);
+
+    const run = await RegistrationRun.create({
+      mahallaKey: mahalla?.key ?? "random",
+      mahallaName: mahalla?.name ?? "Random rejim",
+      status: "pending",
+      control: "run",
+      userUid: user.uid,
+      token,
+      oblId: user.oblId,
+      areaId: user.areaId,
+      districtId: user.districtId,
+      randomMode: true,
+      randomTarget: target,
+      randomAdded: 0,
+      randomHomeId: homeId,
+      randomStreetId: streetId,
+      randomSurveyUuid: surveyUuid,
+      randomOwnerPinfl: ownerPinfl,
+    });
+
+    runRegistration(user, run, token);
+
+    return res.status(202).json({
+      message: `Random rejim boshlandi — ${target} ta muvaffaqiyatli qo'shish maqsad`,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Server xatoligi" });
