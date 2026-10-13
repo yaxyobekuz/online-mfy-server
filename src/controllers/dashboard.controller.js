@@ -117,7 +117,7 @@ const resolveMahalla = async (user) => {
  * aks holda tumandagi 185 ming odam ko'rinib, foiz ma'nosiz
  * bo'lib qolardi.
  */
-const collectStats = async (run) => {
+export const collectStats = async (run, userUid) => {
   const empty = {
     peopleTotal: 0,
     added: 0,
@@ -130,42 +130,92 @@ const collectStats = async (run) => {
 
   if (!run) return empty;
 
-  const [byStatus, homesTotal, cadasters] = await Promise.all([
+  // Hisob BITTA yurish bo'yicha emas, shu MFY ning hamma yurishlari
+  // bo'yicha ketadi.
+  //
+  // Nega: ilgari tugagan yurishdan keyin "Boshlash" bosilsa yangi
+  // bo'sh yurish yaratilardi va panel faqat o'shani ko'rsatardi —
+  // oldingi 855 kiritilgan odam ko'rinmay, hammasi noldan
+  // boshlangandek tuyulardi.
+  //
+  // Sanoq ODAM bo'yicha (JSHSHIR yoki ism), urinish bo'yicha emas:
+  // bir odam bir necha marta urinilgan bo'lishi mumkin va har
+  // urinish alohida sanalsa, raqamlar haqiqatdan katta chiqardi.
+  //
+  // Bir odamda bir nechta urinish turli natija bergan bo'lsa, eng
+  // YAXSHISI olinadi: muvaffaqiyat (added/exists) xatodan ustun —
+  // odam baribir bazaga kirgan.
+  const runIds = await RegistrationRun.distinct("_id", {
+    userUid,
+    mahallaKey: run.mahallaKey,
+  });
+
+  const [people, cadasters] = await Promise.all([
     RegistrationMember.aggregate([
-      { $match: { runId: run._id } },
-      { $group: { _id: "$status", count: { $sum: 1 } } },
+      { $match: { runId: { $in: runIds } } },
+      {
+        $group: {
+          _id: {
+            $ifNull: ["$verifiedPinfl", { $ifNull: ["$pinfl", "$fullName"] }],
+          },
+          // 2 — kirgan, 1 — kirmagan, 0 — hali urinilmagan.
+          best: {
+            $max: {
+              $switch: {
+                branches: [
+                  {
+                    case: { $in: ["$status", ["added", "exists"]] },
+                    then: 2,
+                  },
+                  {
+                    case: { $in: ["$status", ["failed", "skipped"]] },
+                    then: 1,
+                  },
+                ],
+                default: 0,
+              },
+            },
+          },
+        },
+      },
+      { $group: { _id: "$best", count: { $sum: 1 } } },
     ]),
-    RegistrationHome.countDocuments({ runId: run._id }),
-    // Navbatdagi xonadonlarning kadastrlari — "jami aholi" shular
-    // bo'yicha sanaladi.
-    RegistrationHome.distinct("cadasterNumber", { runId: run._id }),
+    // Xonadonlar KADASTR bo'yicha sanaladi, yozuv bo'yicha emas:
+    // bir mahallada bir nechta yurish bo'lsa, har birining o'z
+    // navbati bor va bitta xonadon bir necha marta sanalardi
+    // (424 o'rniga 1696 chiqardi).
+    RegistrationHome.distinct("cadasterNumber", { runId: { $in: runIds } }),
   ]);
 
-  const count = (status) =>
-    byStatus.find((row) => row._id === status)?.count ?? 0;
+  const homesTotal = cadasters.filter(Boolean).length;
 
-  const added = count("added");
-  const exists = count("exists");
-  const failed = count("failed") + count("skipped");
+  const byBest = (value) =>
+    people.find((row) => row._id === value)?.count ?? 0;
 
-  // Urinib ko'rilganlar — shular ustida ish tugagan.
-  const attempted = added + exists + failed;
-  const homesDone = run.homesDone ?? 0;
+  const added = byBest(2);
+  const failed = byBest(1);
 
   const peopleTotal = await Citizen.countDocuments({
     cadasterNumber: { $in: cadasters.filter(Boolean) },
   });
 
-  // Qolganlar — ayirma bilan. Urinishlar sonidan oshib ketmasin:
-  // bitta odam qayta urinilgan bo'lishi mumkin (xonadon qayta
-  // ishlanganda), shunda ayirma manfiy chiqardi.
-  const pending = Math.max(0, peopleTotal - attempted);
+  // Qolganlar — ayirma bilan.
+  const pending = Math.max(0, peopleTotal - added - failed);
+
+  // Tugagan xonadonlar ham kadastr bo'yicha — bitta xonadon
+  // qayta ishlangan bo'lsa ikki marta sanalmasin.
+  const doneCadasters = await RegistrationHome.distinct("cadasterNumber", {
+    runId: { $in: runIds },
+    status: { $in: ["done", "partial", "skipped", "failed"] },
+  });
+
+  const homesDone = doneCadasters.filter(Boolean).length;
 
   return {
     peopleTotal,
     // "Ro'yxatga olingan" ichiga allaqachon ro'yxatda turganlar ham
     // kiradi: mahalla xodimi uchun natija bir xil — odam bazada bor.
-    added: added + exists,
+    added,
     failed,
     pending,
     homesTotal,
@@ -209,10 +259,13 @@ export const getDashboard = async (req, res) => {
       .lean();
 
     const [stats, members, currentHome] = await Promise.all([
-      collectStats(run),
+      collectStats(run, user.uid),
       run
         ? RegistrationMember.find({
-            runId: run._id,
+            // Jonli ro'yxat ham SHU foydalanuvchining barcha
+            // urinishlaridan — yurish almashgani ro'yxatni
+            // bo'shatib yubormasligi kerak.
+            userUid: user.uid,
             // "pending" — hali urinilmagan, natijasi yo'q. Jonli
             // ro'yxat "nima bo'ldi" degan savolga javob beradi,
             // shuning uchun faqat tugagan urinishlar ko'rinadi.
