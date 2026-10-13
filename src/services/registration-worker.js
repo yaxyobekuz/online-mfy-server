@@ -42,6 +42,7 @@ import {
   mahallaKey,
   sameMahalla,
 } from "../utils/mahalla.js";
+import { cadasterKey } from "../utils/cadaster.js";
 import {
   toIsoDate,
   splitDocument,
@@ -1255,11 +1256,26 @@ const processHome = async (
     return { homeStatus: "skipped", ...empty };
   }
 
-  const citizens = await Citizen.find({
+  // Kadastr bir xil xonadon uchun ham turlicha yozilgan bo'lishi
+  // mumkin (platformada "17030102060377", Excel'da
+  // "17:03:01:02:06:0377"). Shuning uchun avval AYNAN qidiramiz —
+  // bu indeksdan foydalanadi va aksariyat holatda yetarli; topilmasa
+  // raqamga tozalangan ko'rinishi bo'yicha qaraymiz.
+  let citizens = await Citizen.find({
     cadasterNumber: homeRow.cadasterNumber,
   })
     .sort({ birthDate: 1, rowNumber: 1 })
     .lean();
+
+  if (!citizens.length) {
+    const variants = await cadasterVariants(homeRow.cadasterNumber);
+
+    if (variants.length) {
+      citizens = await Citizen.find({ cadasterNumber: { $in: variants } })
+        .sort({ birthDate: 1, rowNumber: 1 })
+        .lean();
+    }
+  }
 
   // Allaqachon ro'yxatda turganlarga so'rov yubormaymiz — rate-limit
   // bekorga sarflanmasligi uchun.
@@ -1430,6 +1446,48 @@ const recountRun = async (runId) => {
 
 // Ishchi har qadamda boshqaruv ko'rsatmasini DB'dan o'qiydi —
 // shuning uchun "to'xtatish" tugmasi darhol ishlaydi.
+/**
+ * Kadastrning fuqarolar bazasidagi BOSHQACHA yozilgan ko'rinishlari.
+ *
+ * Aynan moslik topilmaganda ishlatiladi: butun bazadagi unikal
+ * kadastrlar bir marta o'qilib, raqam bo'yicha indekslanadi. Keshsiz
+ * har xonadon uchun `distinct` ketardi — minglab xonadonda bu
+ * sezilarli yuk.
+ *
+ * Kesh jarayon umri davomida yashaydi: yurish ketayotganda fuqarolar
+ * bazasi o'zgarmaydi (yuklash butun kolleksiyani almashtiradi va
+ * undan keyin yurish qaytadan boshlanadi).
+ */
+let cadasterVariantIndex = null;
+
+/**
+ * Fuqarolar bazasi almashtirilganda keshni bo'shatish — aks holda
+ * yangi Excel yuklangandan keyin ham eski kadastrlar ishlatilardi.
+ */
+export const resetCadasterCache = () => {
+  cadasterVariantIndex = null;
+};
+
+const cadasterVariants = async (value) => {
+  const key = cadasterKey(value);
+  if (!key) return [];
+
+  if (!cadasterVariantIndex) {
+    cadasterVariantIndex = new Map();
+
+    for (const original of await Citizen.distinct("cadasterNumber")) {
+      const originalKey = cadasterKey(original);
+      if (!originalKey) continue;
+
+      const bucket = cadasterVariantIndex.get(originalKey);
+      if (bucket) bucket.push(original);
+      else cadasterVariantIndex.set(originalKey, [original]);
+    }
+  }
+
+  return cadasterVariantIndex.get(key) ?? [];
+};
+
 const readControl = async (run) => {
   const fresh = await RegistrationRun.findById(run._id, "control").lean();
   return fresh?.control ?? "stop";
@@ -1438,11 +1496,13 @@ const readControl = async (run) => {
 /**
  * MFY ning xonadonlarini yuklab, navbatni tuzadi.
  *
- * Platforma xonadonlarni MFY bo'yicha emas, KO'CHA bo'yicha beradi;
- * mahalla nomi esa faqat fuqarolar bazasidagi manzilda bor. Shuning
- * uchun: avval mahallaga tegishli kadastrlar fuqarolar bazasidan
- * aniqlanadi, so'ng platformadagi xonadonlar shu ro'yxat bilan
- * kesishtiriladi.
+ * Platforma xonadonlarni MFY bo'yicha emas, KO'CHA bo'yicha beradi.
+ * Shuning uchun avval mahallaga tegishli kadastrlar aniqlanadi
+ * ("Hisoblash" natijasi va mahalla nomi — ikkalasi birgalikda),
+ * so'ng platformadagi xonadonlar shu ro'yxat bilan kesishtiriladi.
+ *
+ * Taqqoslash RAQAM bo'yicha ketadi (`cadasterKey`): bir xonadon
+ * manbalarda turlicha yoziladi.
  */
 const prepareQueue = async (user, run) => {
   await RegistrationRun.updateOne(
@@ -1455,25 +1515,74 @@ const prepareQueue = async (user, run) => {
     message: `"${run.mahallaName ?? run.mahallaKey}" mahallasi tayyorlanmoqda`,
   });
 
-  // 1. Mahallaga tegishli manzillar -> kadastrlar.
+  // 1. Qaysi kadastrlar bilan ishlaymiz.
+  //
+  // IKKI MANBA BIRLASHTIRILADI — biri ikkinchisini almashtirmaydi:
+  //
+  //   a) "Hisoblash" natijasi (`homes`). Platforma tokenga FAQAT
+  //      o'z MFY sining xonadonlarini ko'rsatadi, ya'ni o'sha
+  //      xonadonlarning kadastri mahallani o'zi belgilaydi. Nom
+  //      bu yerda umuman kerak emas — u bir mahallada o'nlab xil
+  //      yoziladi ("ПОЛВОНКУЛ", "Полвонкўл", "POLVONKO`L"...) va
+  //      aynan shu sabab yangi token uchun ish boshlanmasdi.
+  //
+  //   b) Mahalla nomi bo'yicha (eski mantiq).
+  //
+  // Nega ikkalasi ham: `homes` da faqat PLATFORMADA bor xonadonlar
+  // turadi, fuqarolar bazasida esa platformaga hali kirmagan
+  // kadastrlar ham bo'ladi. Faqat `homes` ga tayansak, eski
+  // foydalanuvchilarda navbat qisqarib ketardi (tekshirildi: Ko'l
+  // MFY da 675 o'rniga 657 kadastr). Faqat nomga tayansak, yangi
+  // token umuman ishlamasdi. Birlashma ikkala holatni ham qoplaydi.
+  const cadasterSet = new Set();
+  const sources = [];
+
+  const fromHomes = await Home.distinct("cadasterNumber", {
+    userUid: run.userUid,
+  });
+
+  let homesCount = 0;
+  for (const value of fromHomes) {
+    const key = cadasterKey(value);
+    if (key && !cadasterSet.has(key)) {
+      cadasterSet.add(key);
+      homesCount += 1;
+    }
+  }
+
+  if (homesCount) sources.push(`hisoblangan xonadonlar: ${homesCount}`);
+
   const addresses = await Citizen.distinct("address");
   const matchedAddresses = addresses.filter((address) => {
     const name = extractMahallaName(address);
     return name ? mahallaKey(name) === run.mahallaKey : false;
   });
 
-  if (!matchedAddresses.length) {
-    throw new Error("Bu mahalla umumiy fuqarolar bazasida topilmadi");
+  if (matchedAddresses.length) {
+    let nameCount = 0;
+
+    for (const value of await Citizen.distinct("cadasterNumber", {
+      address: { $in: matchedAddresses },
+    })) {
+      const key = cadasterKey(value);
+      if (key && !cadasterSet.has(key)) {
+        cadasterSet.add(key);
+        nameCount += 1;
+      }
+    }
+
+    if (nameCount) sources.push(`mahalla nomi: ${nameCount}`);
   }
 
-  const cadasters = await Citizen.distinct("cadasterNumber", {
-    address: { $in: matchedAddresses },
-  });
-  const cadasterSet = new Set(cadasters.filter(Boolean));
+  if (!cadasterSet.size) {
+    throw new Error(
+      "Bu mahalla kadastrlari topilmadi — \"Hisoblash\" tugmasini bosib ko'ring",
+    );
+  }
 
   pushRunLog(run._id, {
     level: "info",
-    message: `${matchedAddresses.length} manzil, ${cadasterSet.size} kadastr topildi`,
+    message: `${cadasterSet.size} kadastr topildi (${sources.join(", ")})`,
   });
 
   // 2. Platformaning ko'chalari.
@@ -1535,9 +1644,10 @@ const prepareQueue = async (user, run) => {
       continue;
     }
 
-    const matched = homes.filter(
-      (home) => home.cadaster_number && cadasterSet.has(home.cadaster_number),
-    );
+    const matched = homes.filter((home) => {
+      const key = cadasterKey(home.cadaster_number);
+      return key ? cadasterSet.has(key) : false;
+    });
 
     for (const home of matched) {
       queue.push({
