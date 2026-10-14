@@ -186,6 +186,7 @@ export const collectStats = async (run, userUid) => {
     peopleTotal: 0,
     added: 0,
     exists: 0,
+    movedAway: 0,
     failed: 0,
     pending: 0,
     homesTotal: 0,
@@ -260,28 +261,55 @@ export const collectStats = async (run, userUid) => {
     // urinilgan bo'lishi mumkin (xonadon qayta ishlanganda).
     // Turli natija chiqqan bo'lsa eng yaxshisi olinadi — odam
     // baribir bazaga kirgan.
+    //
+    // FAQAT tugagan kadastrlardagi urinishlar: bir odam bir
+    // kadastrda ishlanib (failed/moved), boshqa — hali `pending`
+    // kadastrda ham turishi mumkin. Unda u ham o'z ustunida, ham
+    // "kutilmoqda" da sanalib, yig'indi jamidan oshib ketardi.
+    // Pending kadastrdagi urinish hali yakuniy emas, shuning uchun
+    // chiqarib tashlanadi — odam "kutilmoqda" bo'lib qoladi.
     RegistrationMember.aggregate([
-      { $match: { runId: { $in: runIds } } },
+      {
+        $match: {
+          runId: { $in: runIds },
+          ...(pendingCadasters.length
+            ? { cadasterNumber: { $nin: pendingCadasters } }
+            : {}),
+        },
+      },
       {
         $group: {
           _id: {
             $ifNull: ["$verifiedPinfl", { $ifNull: ["$pinfl", "$fullName"] }],
           },
           // Odamning eng yaxshi natijasi:
-          //   3 — biz qo'shdik (added)
-          //   2 — platformada allaqachon bor edi (exists)
+          //   4 — biz qo'shdik (added)
+          //   3 — platformada allaqachon bor edi (exists)
+          //   2 — boshqa MFY da ro'yxatda (ko'chib ketgan, movedAway)
           //   1 — kirmadi (failed/skipped)
           //   0 — hali urinilmagan
           //
-          // "added" va "exists" ataylab AJRATILGAN: ikkalasi ham
-          // "odam bazada" degani, lekin biri bizning ishimiz,
-          // ikkinchisi avvaldan turgani — hisobotda alohida ko'rinadi.
+          // "added" va "exists" ajratilgan: ikkalasi ham "odam
+          // bazada", lekin biri bizning ishimiz, ikkinchisi avvaldan
+          // turgani. "movedAway" esa rad etilganlardan ajratiladi:
+          // bu xato emas — odam shunchaki boshqa mahallada yashaydi,
+          // mahalla xodimi uchun bu alohida ma'noli ko'rsatkich.
           best: {
             $max: {
               $switch: {
                 branches: [
-                  { case: { $eq: ["$status", "added"] }, then: 3 },
-                  { case: { $eq: ["$status", "exists"] }, then: 2 },
+                  { case: { $eq: ["$status", "added"] }, then: 4 },
+                  { case: { $eq: ["$status", "exists"] }, then: 3 },
+                  // Rad etilgan, lekin sababi "boshqa MFY da bor".
+                  {
+                    case: {
+                      $and: [
+                        { $in: ["$status", ["failed", "skipped"]] },
+                        { $eq: ["$movedAway", true] },
+                      ],
+                    },
+                    then: 2,
+                  },
                   { case: { $in: ["$status", ["failed", "skipped"]] }, then: 1 },
                 ],
                 default: 0,
@@ -298,7 +326,10 @@ export const collectStats = async (run, userUid) => {
     people.find((row) => row._id === value)?.count ?? 0;
 
   // Biz haqiqatan qo'shgan odamlar — yozuvi aniq ("added").
-  const added = byBest(3);
+  const added = byBest(4);
+  // Boshqa MFY da ro'yxatda turgani uchun kirita olmaganlar.
+  const movedAway = byBest(2);
+  // Haqiqiy xatolar (ma'lumot mos emas, hujjat yaroqsiz, ...).
   const failed = byBest(1);
 
   // ALLAQACHON BOR = qolgan hammasi (ayirma bilan).
@@ -310,16 +341,21 @@ export const collectStats = async (run, userUid) => {
   // ayirmadan qo'shsak ikki marta hisoblanib ketardi. Shuning uchun
   // butun qoldiq shu ustunga olinadi.
   //
-  // Tugagan xonadondagi odam faqat uch holatda bo'ladi: biz
-  // qo'shdik (added), avval bor edi (exists), yoki rad etildi
-  // (failed). Pending — hali ishlanmagan xonadonlarники. Demak
-  // qoldiq aynan "allaqachon bor" ga teng.
-  const exists = Math.max(0, peopleTotal - added - failed - pending);
+  // Tugagan xonadondagi odam quyidagi holatlarda bo'ladi: biz
+  // qo'shdik (added), avval shu bazada bor edi (exists), boshqa
+  // MFY da ro'yxatda (movedAway), yoki rad etildi (failed).
+  // Pending — hali ishlanmagan xonadonlarники. Demak qoldiq aynan
+  // "allaqachon bor" ga teng.
+  const exists = Math.max(
+    0,
+    peopleTotal - added - movedAway - failed - pending,
+  );
 
   return {
     peopleTotal,
     added,
     exists,
+    movedAway,
     failed,
     pending,
     homesTotal,
