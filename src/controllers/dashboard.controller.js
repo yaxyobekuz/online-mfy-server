@@ -200,9 +200,22 @@ export const collectStats = async (run, userUid) => {
   // bo'yicha ketadi: ilgari tugagan yurishdan keyin "Boshlash"
   // bosilsa yangi bo'sh yurish yaratilardi va panel faqat o'shani
   // ko'rsatib, oldingi ish ko'rinmay qolardi.
+  // Kadastr yurishlari — hisob-kitob shular bo'yicha ketadi
+  // (xonadon, sabab, "allaqachon bor"). Random yurishlar bu yerga
+  // KIRMAYDI: ularda xonadon yo'q, ko'p odam rad etiladi (tasodifiy
+  // tanlov), va bu sonlar kadastr manzarasini buzardi. Random
+  // rejimda QO'SHILGAN odamlar pastda alohida, additiv tarzda
+  // qo'shiladi.
   const runIds = await RegistrationRun.distinct("_id", {
     userUid,
     mahallaKey: run.mahallaKey,
+  });
+
+  // Shu MFY ning random yurishlari (ularda mahallaKey username
+  // bo'lishi mumkin, shuning uchun alohida olinadi).
+  const randomRunIds = await RegistrationRun.distinct("_id", {
+    userUid,
+    randomMode: true,
   });
 
   // --- Xonadonlar ---
@@ -239,7 +252,7 @@ export const collectStats = async (run, userUid) => {
   const homesDone = homesTotal - pendingCadasters.length;
 
   // --- Odamlar ---
-  const [peopleTotal, pending, people] = await Promise.all([
+  const [cadasterPeople, pending, people] = await Promise.all([
     Citizen.countDocuments({ cadasterNumber: { $in: allCadasters } }),
 
     // KUTILMOQDA = hali ishlanmagan xonadonlardagi odamlar.
@@ -271,10 +284,20 @@ export const collectStats = async (run, userUid) => {
     RegistrationMember.aggregate([
       {
         $match: {
-          runId: { $in: runIds },
-          ...(pendingCadasters.length
-            ? { cadasterNumber: { $nin: pendingCadasters } }
-            : {}),
+          $or: [
+            {
+              // Kadastr yurishlaridagi yakuniy urinishlar.
+              runId: { $in: runIds },
+              ...(pendingCadasters.length
+                ? { cadasterNumber: { $nin: pendingCadasters } }
+                : {}),
+            },
+            {
+              // Random rejimda QO'SHILGANLAR — ular ham "added".
+              runId: { $in: randomRunIds },
+              status: "added",
+            },
+          ],
         },
       },
       {
@@ -325,12 +348,26 @@ export const collectStats = async (run, userUid) => {
   const byBest = (value) =>
     people.find((row) => row._id === value)?.count ?? 0;
 
-  // Biz haqiqatan qo'shgan odamlar — yozuvi aniq ("added").
+  // Biz haqiqatan qo'shgan odamlar — kadastr va random, ODAM
+  // bo'yicha birlashtirilgan (yuqoridagi agregatsiya random
+  // "added" larni ham qamrab oladi).
   const added = byBest(4);
   // Boshqa MFY da ro'yxatda turgani uchun kirita olmaganlar.
   const movedAway = byBest(2);
   // Haqiqiy xatolar (ma'lumot mos emas, hujjat yaroqsiz, ...).
   const failed = byBest(1);
+
+  // JAMI AHOLI = kadastr xonadonlaridagi fuqarolar, lekin KAMIDA
+  // allaqachon hisobga olinganlar yig'indisi. Random rejimda
+  // qo'shilgan odamlar kadastr bazasida bo'lmasligi mumkin (ular
+  // alohida tanlangan), shuning uchun "qo'shilgan" soni kadastr
+  // aholisidan oshib ketishi mumkin. Bunday holda jami ularni ham
+  // qamrab oladi — aks holda "qo'shilgan > jami" degan bema'nilik
+  // chiqardi va `exists` manfiy bo'lardi.
+  const peopleTotal = Math.max(
+    cadasterPeople,
+    added + movedAway + failed + pending,
+  );
 
   // ALLAQACHON BOR = qolgan hammasi (ayirma bilan).
   //
