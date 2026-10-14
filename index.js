@@ -3,6 +3,8 @@ import "./src/config/env.js";
 import express from "express";
 import cors from "cors";
 import connectDB from "./src/config/database.js";
+import authRoutes from "./src/routes/auth.routes.js";
+import mfyTokenRoutes from "./src/routes/mfy-token.routes.js";
 import userRoutes from "./src/routes/user.routes.js";
 import citizenRoutes from "./src/routes/citizen.routes.js";
 import dashboardRoutes from "./src/routes/dashboard.routes.js";
@@ -44,8 +46,14 @@ await connectDB();
 
 app.use(cors());
 app.use(express.json());
+
+// Sog'liq tekshiruvi — sessiyasiz.
+app.get("/api/health", (req, res) => res.json({ ok: true }));
+
 app.use(authContext);
 
+app.use("/api", authRoutes);
+app.use("/api", mfyTokenRoutes);
 app.use("/api", userRoutes);
 app.use("/api", citizenRoutes);
 app.use("/api", dashboardRoutes);

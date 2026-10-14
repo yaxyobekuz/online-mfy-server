@@ -48,6 +48,14 @@ const setScan = (uid, patch) => scans.set(uid, { ...scanState(uid), ...patch });
 // To'xtatish bayrog'i (foydalanuvchi "to'xtatish" bossa).
 const stopFlags = new Set();
 
+/**
+ * Shu MFY ning yuklash jarayonini tashqaridan to'xtatish — token
+ * o'chirilganda chaqiriladi.
+ */
+export const stopHomeMembersScanFor = (uid) => {
+  if (scanState(uid).status === "running") stopFlags.add(uid);
+};
+
 const limited = (uid, fn) =>
   withRateLimit(fn, { delayMs: 150, adaptiveKey: `home-members:${uid}` });
 
