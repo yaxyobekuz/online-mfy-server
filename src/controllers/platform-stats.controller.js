@@ -127,32 +127,52 @@ export const getPlatformStats = async (req, res) => {
 
       // Har MFY bo'yicha yurishlar yig'indisi + progress.
       //
-      // Progress (homesTotal/Done) KADASTR yurishidan olinadi: random
-      // yurishda xonadon 0 bo'ladi va eng so'nggisini ko'r-ko'rona
-      // olsak, progress 0 bo'lib qolardi. Shuning uchun avval random
-      // bo'lmagan, keyin boshlangan yurishlar tartibida saralaymiz.
+      // Progress ikki manbadan kelishi mumkin:
+      //   - KADASTR yurishi: homesDone/homesTotal;
+      //   - RANDOM yurishi: randomAdded/randomTarget (xonadon yo'q).
+      // Agar hozir RANDOM yurish ketayotgan bo'lsa, uning progressi
+      // ko'rinishi kerak. Shuning uchun har MFY uchun:
+      //   - eng SO'NGGI yurishning random maydonlari (random bo'lsa);
+      //   - eng so'nggi KADASTR yurishining homes maydonlari;
+      // ikkalasi ham olinadi va keyin qaysi biri faol ekaniga qarab
+      // tanlanadi.
       RegistrationRun.aggregate([
-        {
-          $sort: {
-            randomMode: 1, // false (0) oldinda
-            createdAt: -1,
-          },
-        },
+        { $sort: { createdAt: -1 } },
         {
           $group: {
             _id: "$userUid",
-            // Mahalla nomi — nomi bor birinchi yurishdan.
             mahallaName: {
-              $first: { $cond: [{ $ifNull: ["$mahallaName", false] }, "$mahallaName", "$$REMOVE"] },
+              $first: {
+                $cond: [
+                  { $ifNull: ["$mahallaName", false] },
+                  "$mahallaName",
+                  "$$REMOVE",
+                ],
+              },
             },
-            status: { $first: "$status" },
-            ownerId: { $first: "$ownerId" },
-            heartbeatAt: { $first: "$heartbeatAt" },
-            stage: { $first: "$stage" },
-            homesTotal: { $first: "$homesTotal" },
-            homesDone: { $first: "$homesDone" },
+            // Eng so'nggi yurish — faollik va stage shundan.
+            lastStatus: { $first: "$status" },
+            lastRandom: { $first: "$randomMode" },
+            lastStage: { $first: "$stage" },
+            lastOwnerId: { $first: "$ownerId" },
+            lastHeartbeat: { $first: "$heartbeatAt" },
+            lastRandomTarget: { $first: "$randomTarget" },
+            lastRandomAdded: { $first: "$randomAdded" },
+            lastHomesTotal: { $first: "$homesTotal" },
+            lastHomesDone: { $first: "$homesDone" },
+            // Eng so'nggi KADASTR (non-random) yurishning xonadonlari —
+            // random faol bo'lmagan holat uchun.
+            cadasterHomesTotal: {
+              $first: {
+                $cond: [{ $ne: ["$randomMode", true] }, "$homesTotal", "$$REMOVE"],
+              },
+            },
+            cadasterHomesDone: {
+              $first: {
+                $cond: [{ $ne: ["$randomMode", true] }, "$homesDone", "$$REMOVE"],
+              },
+            },
             lastRunAt: { $max: "$createdAt" },
-            // Shu MFY ning BARCHA yurishlaridagi jami.
             membersAdded: { $sum: "$membersAdded" },
             runsCount: { $sum: 1 },
           },
@@ -175,25 +195,40 @@ export const getPlatformStats = async (req, res) => {
       .map((r) => {
         const active = isRunActiveAnywhere({
           _id: r._id,
-          ownerId: r.ownerId,
-          heartbeatAt: r.heartbeatAt,
+          ownerId: r.lastOwnerId,
+          heartbeatAt: r.lastHeartbeat,
         });
         const token = tokenByUid.get(r._id);
+
+        // Hozir RANDOM yurish ketayotgan bo'lsa, progress random
+        // maqsad bo'yicha; aks holda kadastr xonadonlari bo'yicha.
+        const isRandom = r.lastRandom === true;
+
+        let homesTotal;
+        let homesDone;
+        if (isRandom) {
+          homesTotal = r.lastRandomTarget ?? 0;
+          homesDone = r.lastRandomAdded ?? 0;
+        } else {
+          homesTotal = r.cadasterHomesTotal ?? r.lastHomesTotal ?? 0;
+          homesDone = r.cadasterHomesDone ?? r.lastHomesDone ?? 0;
+        }
 
         return {
           uid: r._id,
           name: r.mahallaName ?? token?.username ?? r._id,
-          status: r.status,
+          status: r.lastStatus,
           active,
+          randomMode: isRandom,
           tokenStatus: token?.status ?? null,
           hasToken: Boolean(token),
-          stage: active ? (r.stage ?? null) : null,
+          stage: active ? (r.lastStage ?? null) : null,
           added: r.membersAdded ?? 0,
-          homesTotal: r.homesTotal ?? 0,
-          homesDone: r.homesDone ?? 0,
+          homesTotal,
+          homesDone,
           percent:
-            r.homesTotal > 0
-              ? Math.round((r.homesDone / r.homesTotal) * 100)
+            homesTotal > 0
+              ? Math.min(100, Math.round((homesDone / homesTotal) * 100))
               : 0,
           runsCount: r.runsCount,
           lastRunAt: r.lastRunAt,
