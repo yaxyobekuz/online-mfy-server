@@ -7,6 +7,7 @@ import {
 } from "../controllers/dashboard.controller.js";
 import { streamDashboard } from "../controllers/dashboard-stream.controller.js";
 import { getStatistics } from "../controllers/statistics.controller.js";
+import { getPlatformStats } from "../controllers/platform-stats.controller.js";
 import {
   startMahallaScan,
   getMahallaScanStatus,
@@ -41,5 +42,6 @@ router.post("/dashboard/random-start", randomStart);
 router.get("/dashboard", getDashboard);
 
 router.get("/statistics", getStatistics);
+router.get("/platform-stats", getPlatformStats);
 
 export default router;
