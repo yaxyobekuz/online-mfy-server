@@ -30,6 +30,7 @@ const publicView = (doc) => ({
   username: doc.username ?? null,
   mahallaName: doc.mahallaName ?? null,
   status: doc.status,
+  hidden: Boolean(doc.hidden),
   lastCheckedAt: doc.lastCheckedAt ?? null,
 });
 
@@ -145,6 +146,28 @@ export const updateMfyToken = async (req, res) => {
     },
     { returnDocument: "after" },
   ).lean();
+
+  return res.status(200).json(publicView(doc));
+};
+
+/**
+ * PATCH /api/mfy-tokens/:uid/visibility  { hidden }
+ *
+ * MFY ni panelda yashiradi yoki qayta ochadi. Bu FAQAT ko'rinish:
+ * token, jarayonlar va statistika o'zgarmaydi — yashirilgan MFY
+ * baribir ishlayveradi, shunchaki ro'yxatda ko'rinmaydi.
+ */
+export const setMfyVisibility = async (req, res) => {
+  const { uid } = req.params;
+  const hidden = Boolean(req.body?.hidden);
+
+  const doc = await MfyToken.findOneAndUpdate(
+    { uid },
+    { $set: { hidden } },
+    { returnDocument: "after" },
+  ).lean();
+
+  if (!doc) return res.status(404).json({ message: "Bu MFY topilmadi" });
 
   return res.status(200).json(publicView(doc));
 };

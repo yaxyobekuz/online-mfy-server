@@ -41,6 +41,11 @@ const mfyTokenSchema = new Schema(
 
     // Oxirgi marta tekshirilgan/ishlatilgan vaqt.
     lastCheckedAt: { type: Date },
+
+    // Panelda yashirilganmi — faqat KO'RINISH uchun. Yashirilgan MFY
+    // ro'yxatda ko'rinmaydi, lekin tokeni, jarayonlari va
+    // statistikasi o'z joyida qoladi. Istalgan vaqt qayta ochiladi.
+    hidden: { type: Boolean, default: false },
   },
   { timestamps: true },
 );
