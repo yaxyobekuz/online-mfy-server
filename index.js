@@ -16,19 +16,22 @@ const PORT = process.env.PORT || 5000;
 await connectDB();
 
 // Server qayta ishga tushganda, OLDINGI nusxasi qoldirgan egalikni
-// bo'shatamiz.
+// bo'shatib, uzilib qolgan yurishlarni AVTOMATIK davom ettiramiz.
 //
 // Nega kerak: ishchi egalikni `finally` blokida bo'shatadi, lekin
-// jarayon majburan to'xtatilsa (kill, qayta ishga tushirish) u
-// ishlamaydi. Natijada yurish "asosiy serverda ketmoqda" deb
-// qolib ketadi va "Davom ettirish" o'tkazib yuboriladi — jarayon
-// esa aslida to'xtagan.
+// jarayon majburan to'xtatilsa (kill, deploy, qayta ishga tushirish)
+// u ishlamaydi. Natijada yurish "ketmoqda" deb qolib ketardi,
+// ishchisi esa o'lgan bo'lardi — foydalanuvchi qo'lda "Boshlash"
+// bosishi kerak edi. Endi server o'zi ko'tarib ketadi.
 //
 // Faqat SHU server nomidagi egalik tozalanadi: boshqa serverniki
 // tegilmaydi (u haqiqatan ishlayotgan bo'lishi mumkin).
 {
   const { default: RegistrationRun } = await import(
     "./src/models/RegistrationRun.js"
+  );
+  const { runRegistration } = await import(
+    "./src/services/registration-worker.js"
   );
 
   const serverName = process.env.SERVER_NAME ?? "asosiy";
@@ -40,6 +43,53 @@ await connectDB();
   if (released.modifiedCount) {
     console.log(
       `Oldingi nusxadan qolgan ${released.modifiedCount} ta yurish egaligi bo'shatildi`,
+    );
+  }
+
+  // Foydalanuvchi to'xtatgan, lekin ishchi yozib ulgurmagan
+  // yurishlar: `control` "stop"/"pause" bo'lsa-yu, status hali
+  // "running" bo'lsa — statusni to'g'rilaymiz (aks holda ular
+  // abadiy "ketmoqda" ko'rinardi va statistika chalg'itardi).
+  await RegistrationRun.updateMany(
+    { status: { $in: ["running", "preparing"] }, control: "stop" },
+    { $set: { status: "stopped", stage: "To'xtatildi", finishedAt: new Date() } },
+  );
+  await RegistrationRun.updateMany(
+    { status: { $in: ["running", "preparing"] }, control: "pause" },
+    { $set: { status: "paused", stage: "To'xtatib turildi" } },
+  );
+
+  // Uzilib qolgan yurishlarni davom ettiramiz.
+  //
+  // Faqat ishlashi kerak bo'lganlari: "running"/"preparing" —
+  // foydalanuvchi to'xtatmagan (pause/stop EMAS), demak uzilish
+  // deploy yoki nosozlik tufayli. Token saqlanган bo'lishi shart
+  // (usiz tashqi API ishlamaydi).
+  const stranded = await RegistrationRun.find({
+    status: { $in: ["running", "preparing"] },
+    control: "run",
+    token: { $nin: [null, ""] },
+  })
+    .select("+token")
+    .lean();
+
+  for (const run of stranded) {
+    const user = {
+      uid: run.userUid,
+      oblId: run.oblId,
+      areaId: run.areaId,
+      districtId: run.districtId,
+    };
+
+    // Fonda ishga tushiramiz — serverni bloklamaymiz.
+    runRegistration(user, run, run.token).catch((err) =>
+      console.error(`Yurish davom ettirilmadi (${run.mahallaName}):`, err.message),
+    );
+  }
+
+  if (stranded.length) {
+    console.log(
+      `${stranded.length} ta uzilib qolgan yurish avtomatik davom ettirilmoqda`,
     );
   }
 }
