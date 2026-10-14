@@ -1305,8 +1305,18 @@ const processHome = async (
   let added = 0;
   let failed = 0;
   let skipped = 0;
+  let interrupted = null;
 
   for (const citizen of candidates) {
+    // To'xtatish/pauza tugmasi a'zolar oralig'ida ham sezilsin —
+    // bitta xonadon 20 ta so'rov bo'lishi mumkin, oxirigacha
+    // kutmaymiz. Keshlangani uchun bu arzon.
+    const control = await readControlCached(run);
+    if (control !== "run") {
+      interrupted = control;
+      break;
+    }
+
     const result = await registerOneMember(
       user,
       run,
@@ -1326,6 +1336,17 @@ const processHome = async (
     // ko'rib turadi. Qayta hisoblash manbadan ketadi, shuning uchun
     // xonadon qayta ishlangan bo'lsa ham son to'g'ri qoladi.
     await recountRun(run._id);
+  }
+
+  // To'xtatildi: xonadon TUGALLANMAGAN. Uni `pending` ga qaytaramiz,
+  // shunda davom ettirilganda qayta ishlanadi (allaqachon
+  // qo'shilganlar `takenPinfls` orqali o'tkazib yuboriladi).
+  if (interrupted) {
+    await RegistrationHome.updateOne(
+      { _id: homeRow._id },
+      { $set: { status: "pending" }, $unset: { startedAt: "" } },
+    );
+    return { homeStatus: "pending", added, failed, skipped, interrupted };
   }
 
   // Xonadonning holati a'zolar natijasidan chiqadi. Diqqat: bu
@@ -1492,6 +1513,33 @@ const readControl = async (run) => {
   const fresh = await RegistrationRun.findById(run._id, "control").lean();
   return fresh?.control ?? "stop";
 };
+
+// Boshqaruvni TEZ-TEZ o'qish uchun qisqa muddatli kesh.
+//
+// Nega kerak: "to'xtatish" tugmasi bosilganda ishchi buni darhol
+// sezishi kerak. Avval boshqaruv faqat har XONADONDAN oldin
+// o'qilardi, bitta xonadon esa (20 tagacha a'zo, har biri tashqi
+// so'rov) o'nlab soniya ketardi — tugma bosilgach ham jarayon
+// uzoq davom etardi. Endi a'zolar oralig'ida ham tekshiramiz, lekin
+// har safar bazaga bormaslik uchun javob ~1.5 soniya keshlanadi.
+const CONTROL_CACHE_MS = 1500;
+const controlCache = new Map();
+
+const readControlCached = async (run) => {
+  const id = String(run._id);
+  const cached = controlCache.get(id);
+
+  if (cached && Date.now() - cached.at < CONTROL_CACHE_MS) {
+    return cached.value;
+  }
+
+  const value = await readControl(run);
+  controlCache.set(id, { value, at: Date.now() });
+  return value;
+};
+
+// Yurish tugaganda keshni tozalaymiz (xotira o'smasin).
+const clearControlCache = (runId) => controlCache.delete(String(runId));
 
 /**
  * MFY ning xonadonlarini yuklab, navbatni tuzadi.
@@ -2184,6 +2232,7 @@ const runRandomWorker = async (user, runDoc) => {
     });
   } finally {
     activeRuns.delete(runId);
+    clearControlCache(runId);
     await RegistrationRun.updateOne(
       { _id: run._id, ownerId: SERVER_ID },
       { $set: { ownerId: null, ownerName: null } },
@@ -2434,7 +2483,7 @@ const runWorker = async (user, runDoc) => {
         },
       );
 
-      await processHome(
+      const homeResult = await processHome(
         user,
         run,
         homeRow,
@@ -2448,6 +2497,11 @@ const runWorker = async (user, runDoc) => {
       // o'chib qolgan bo'lsa), $inc esa bunda ikki marta qo'shib
       // yuborardi va sonlar haqiqatdan uzoqlashardi.
       await recountRun(run._id);
+
+      // Xonadon o'rtasida to'xtatilgan bo'lsa — siklni uzamiz.
+      // Keyingi aylanishdagi boshqaruv tekshiruvi holatni (paused/
+      // stopped) rasmiylashtiradi va xonadon `pending` da qoladi.
+      if (homeResult?.interrupted) continue;
     }
 
     await RegistrationRun.updateOne(
@@ -2494,6 +2548,7 @@ const runWorker = async (user, runDoc) => {
     });
   } finally {
     activeRuns.delete(runId);
+    clearControlCache(runId);
 
     // Egalikni bo'shatamiz — boshqa server davom ettira olsin.
     await RegistrationRun.updateOne(
