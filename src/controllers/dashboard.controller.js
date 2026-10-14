@@ -185,6 +185,7 @@ export const collectStats = async (run, userUid) => {
   const empty = {
     peopleTotal: 0,
     added: 0,
+    exists: 0,
     failed: 0,
     pending: 0,
     homesTotal: 0,
@@ -266,12 +267,21 @@ export const collectStats = async (run, userUid) => {
           _id: {
             $ifNull: ["$verifiedPinfl", { $ifNull: ["$pinfl", "$fullName"] }],
           },
-          // 2 — kirgan, 1 — kirmagan, 0 — hali urinilmagan.
+          // Odamning eng yaxshi natijasi:
+          //   3 — biz qo'shdik (added)
+          //   2 — platformada allaqachon bor edi (exists)
+          //   1 — kirmadi (failed/skipped)
+          //   0 — hali urinilmagan
+          //
+          // "added" va "exists" ataylab AJRATILGAN: ikkalasi ham
+          // "odam bazada" degani, lekin biri bizning ishimiz,
+          // ikkinchisi avvaldan turgani — hisobotda alohida ko'rinadi.
           best: {
             $max: {
               $switch: {
                 branches: [
-                  { case: { $in: ["$status", ["added", "exists"]] }, then: 2 },
+                  { case: { $eq: ["$status", "added"] }, then: 3 },
+                  { case: { $eq: ["$status", "exists"] }, then: 2 },
                   { case: { $in: ["$status", ["failed", "skipped"]] }, then: 1 },
                 ],
                 default: 0,
@@ -287,19 +297,29 @@ export const collectStats = async (run, userUid) => {
   const byBest = (value) =>
     people.find((row) => row._id === value)?.count ?? 0;
 
+  // Biz haqiqatan qo'shgan odamlar — yozuvi aniq ("added").
+  const added = byBest(3);
   const failed = byBest(1);
 
-  // RO'YXATGA OLINGAN = qolgan hammasi.
+  // ALLAQACHON BOR = qolgan hammasi (ayirma bilan).
   //
-  // Tugagan xonadondagi odam yo kiritilgan, yo allaqachon ro'yxatda
-  // bo'lgan. Ikkinchisida bizda yozuv yo'q (so'rov yuborilmagan),
-  // shuning uchun uni ayirma bilan olamiz — aks holda platformada
-  // turgan ~460 kishi hech qaysi ustunga tushmay qolardi.
-  const added = Math.max(0, peopleTotal - failed - pending);
+  // Nega ayirma: platformada avvaldan turgan odamga ishchi so'rov
+  // YUBORMAYDI (rate-limit tejash uchun), ya'ni ularning ko'pida
+  // `RegistrationMember` yozuvi umuman bo'lmaydi. "exists" yozuvi
+  // bo'lganlari ham bor, lekin ularni alohida sanab, yozuvsizlarini
+  // ayirmadan qo'shsak ikki marta hisoblanib ketardi. Shuning uchun
+  // butun qoldiq shu ustunga olinadi.
+  //
+  // Tugagan xonadondagi odam faqat uch holatda bo'ladi: biz
+  // qo'shdik (added), avval bor edi (exists), yoki rad etildi
+  // (failed). Pending — hali ishlanmagan xonadonlarники. Demak
+  // qoldiq aynan "allaqachon bor" ga teng.
+  const exists = Math.max(0, peopleTotal - added - failed - pending);
 
   return {
     peopleTotal,
     added,
+    exists,
     failed,
     pending,
     homesTotal,
