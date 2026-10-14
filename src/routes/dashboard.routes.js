@@ -11,12 +11,27 @@ import {
   startMahallaScan,
   getMahallaScanStatus,
 } from "../controllers/mahalla-scan.controller.js";
+import {
+  startHomeMembersScan,
+  stopHomeMembersScan,
+  getHomeMembersScanStatus,
+  getHomeMembers,
+  exportHomeMembers,
+} from "../controllers/home-members.controller.js";
 
 const router = Router();
 
 // "Hisoblash" — MFY xonadonlarini bir martalik aniqlab olish.
 router.post("/mahalla-scan", startMahallaScan);
 router.get("/mahalla-scan/status", getMahallaScanStatus);
+
+// MFY xonadon a'zolarini to'liq yuklab olish.
+// Aniq yo'llar :param'dan oldin turishi kerak.
+router.post("/home-members/scan", startHomeMembersScan);
+router.post("/home-members/scan/stop", stopHomeMembersScan);
+router.get("/home-members/scan/status", getHomeMembersScanStatus);
+router.get("/home-members/export", exportHomeMembers);
+router.get("/home-members", getHomeMembers);
 
 // Aniq yo'llar :param'dan oldin turishi kerak.
 router.get("/dashboard/stream", streamDashboard);
