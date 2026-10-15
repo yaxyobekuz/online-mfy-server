@@ -263,7 +263,11 @@ export const reasonCodeOf = (reason) => {
 
   if (/topilmadi/i.test(text)) return "bazada_topilmadi";
   if (/Internal Server Error/i.test(text)) return "server_xatosi";
-  if (/ENOTFOUND|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|tarmoq/i.test(text)) {
+  if (
+    /ENOTFOUND|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ECONNABORTED|timeout|tarmoq/i.test(
+      text,
+    )
+  ) {
     return "tarmoq";
   }
   if (/sana/i.test(text)) return "sana_notogri";

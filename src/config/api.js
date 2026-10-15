@@ -6,6 +6,11 @@ import {
 
 const api = axios.create({
   baseURL: process.env.API_BASE_URL,
+  // So'rov cheksiz osilib qolmasin: platforma sekinlashsa yoki
+  // ulanish uzilsa, 35 soniyadan keyin uziladi. Bu ishchiga
+  // boshqaruvni (to'xtatish) qayta o'qish imkonini beradi — aks
+  // holda "To'xtatish" bosilgach ham so'rov tugaguncha kutilardi.
+  timeout: 35000,
 });
 
 // Request — joriy MFY tokenini qo'yamiz (agar so'rovning o'zi
