@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import api from "../config/api.js";
 import FamilyMember from "../models/FamilyMember.js";
+import Citizen from "../models/Citizen.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { withRateLimit, getRateLimitState } from "../utils/rate-limit.js";
 
@@ -473,7 +474,36 @@ export const getHomeMembersScanStatus = async (req, res) => {
 };
 
 /**
- * GET /api/home-members — saqlangan a'zolarni sahifalab beradi.
+ * "QO'SHIMCHA A'ZOLAR" filtri.
+ *
+ * Bu sahifaning maqsadi: umumiy fuqarolar bazasida ("Jami aholi",
+ * `citizens`) YO'Q bo'lgan a'zolarni ajratib ko'rsatish. Shunday
+ * odamlar platformada bor, lekin bazaga tushmagan — ularni qo'lda
+ * qo'shish kerak.
+ *
+ * Mantiq: a'zoning JSHSHIR'i `citizens` da bo'lsa — u "jami aholi"
+ * da bor, ko'rsatilmaydi. JSHSHIR yo'q yoki `citizens` da topilmasa —
+ * qo'shimcha a'zo.
+ *
+ * Qaytaradi: SHU foydalanuvchining `citizens` da MAVJUD bo'lgan
+ * a'zo JSHSHIR'lari to'plami (filtrda chetlab o'tish uchun).
+ */
+const existingCitizenPinfls = async (userUid) => {
+  const pinfls = await FamilyMember.distinct("pinfl", {
+    userUid,
+    pinfl: { $nin: [null, ""] },
+  });
+
+  if (!pinfls.length) return new Set();
+
+  const found = await Citizen.distinct("pinfl", { pinfl: { $in: pinfls } });
+  return new Set(found.map((p) => String(p)));
+};
+
+/**
+ * GET /api/home-members — QO'SHIMCHA a'zolarni sahifalab beradi.
+ *
+ * Faqat "Jami aholi" (citizens) bazasida YO'Q bo'lgan a'zolar.
  */
 export const getHomeMembers = async (req, res) => {
   const user = getRequestUser();
@@ -483,16 +513,29 @@ export const getHomeMembers = async (req, res) => {
   const size = Math.min(100, Math.max(1, Number(req.query.size) || 50));
   const search = String(req.query.search ?? "").trim();
 
-  const filter = { userUid: user.uid };
+  // "Jami aholi" da MAVJUD bo'lgan JSHSHIR'lar — ularni chetlab
+  // o'tamiz, faqat qo'shimchalar qoladi.
+  const existing = await existingCitizenPinfls(user.uid);
+
+  const filter = {
+    userUid: user.uid,
+    // JSHSHIR yo'q (bazada topib bo'lmaydi) YOKI citizens da yo'q.
+    $and: [
+      {
+        $or: [
+          { pinfl: { $in: [null, ""] } },
+          { pinfl: { $nin: [...existing] } },
+        ],
+      },
+    ],
+  };
 
   if (search) {
     // Kirill/lotin FIO, JSHSHIR yoki kadastr bo'yicha.
     const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    filter.$or = [
-      { fullName: rx },
-      { pinfl: rx },
-      { cadasterNumber: rx },
-    ];
+    filter.$and.push({
+      $or: [{ fullName: rx }, { pinfl: rx }, { cadasterNumber: rx }],
+    });
   }
 
   const [total, items] = await Promise.all([
@@ -534,13 +577,22 @@ const RELATIONSHIP_LABELS = {
 const DOCUMENT_TYPE_LABELS = { 1: "Pasport / ID-karta", 2: "Guvohnoma" };
 
 /**
- * GET /api/home-members/export — barcha a'zolarni Excel qilib beradi.
+ * GET /api/home-members/export — QO'SHIMCHA a'zolarni Excel qilib
+ * beradi (umumiy bazada yo'q bo'lganlar).
  */
 export const exportHomeMembers = async (req, res) => {
   const user = getRequestUser();
   if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
 
-  const rows = await FamilyMember.find({ userUid: user.uid })
+  const existing = await existingCitizenPinfls(user.uid);
+
+  const rows = await FamilyMember.find({
+    userUid: user.uid,
+    $or: [
+      { pinfl: { $in: [null, ""] } },
+      { pinfl: { $nin: [...existing] } },
+    ],
+  })
     .sort({ cadasterNumber: 1, homeId: 1, _id: 1 })
     .lean();
 
