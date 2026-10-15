@@ -43,6 +43,7 @@ import {
   sameMahalla,
 } from "../utils/mahalla.js";
 import { cadasterKey } from "../utils/cadaster.js";
+import { randomUzPhone, normalizePhone } from "../utils/phone.js";
 import {
   toIsoDate,
   splitDocument,
@@ -2296,8 +2297,357 @@ export const runRegistration = async (user, runDoc, token) => {
   // tayanmaymiz: bu yerda ataylab yangi kontekst ochiladi, shunda
   // yurish server qayta ishga tushgandan keyin ham (saqlangan token
   // bilan) davom eta oladi.
-  const worker = runDoc.randomMode ? runRandomWorker : runWorker;
+  const worker = runDoc.extraMode
+    ? runExtraWorker
+    : runDoc.randomMode
+      ? runRandomWorker
+      : runWorker;
   return requestContext.run({ token, user }, () => worker(user, runDoc));
+};
+
+// ---------------------------------------------------------------
+// Qo'shimcha a'zolar rejimi
+// ---------------------------------------------------------------
+
+/**
+ * Qo'shimcha a'zolar navbatini tuzadi: yuklangan FamilyMember'lar
+ * KADASTR bo'yicha guruhlanib, RegistrationHome navbatiga yoziladi.
+ *
+ * Manba — `citizens` emas, platformadan yuklangan `FamilyMember`
+ * (pa_survey_general). Har xonadon uchun: kadastr, egasi (pinfl),
+ * ko'cha va survey_uuid saqlanadi.
+ */
+const prepareExtraQueue = async (user, run) => {
+  await RegistrationRun.updateOne(
+    { _id: run._id },
+    { $set: { status: "preparing", stage: "Qo'shimcha a'zolar guruhlanmoqda" } },
+  );
+
+  // Xonadon egasini (relationship = "хонадон эгаси") POST qilmaymiz —
+  // u allaqachon platformada egasi. Faqat a'zolar.
+  const members = await FamilyMember.find({
+    userUid: user.uid,
+    isOwner: { $ne: true },
+    cadasterNumber: { $nin: [null, ""] },
+  }).lean();
+
+  if (!members.length) {
+    throw new Error(
+      "Qo'shimcha a'zolar topilmadi — avval \"Qo'shimcha a'zolar\" bo'limida yuklang",
+    );
+  }
+
+  // Kadastr bo'yicha guruhlash — har xonadon bitta navbat yozuvi.
+  const byCadaster = new Map();
+  for (const m of members) {
+    if (!byCadaster.has(m.cadasterNumber)) {
+      byCadaster.set(m.cadasterNumber, {
+        cadasterNumber: m.cadasterNumber,
+        homeId: m.homeId,
+        streetId: m.streetId,
+        streetName: m.streetName,
+        homeNum: m.homeNum,
+        surveyUuid: m.surveyUuid,
+        // Egasi pinfl — shu kadastrdagi egasidan.
+        ownerPinfl: null,
+        count: 0,
+      });
+    }
+    byCadaster.get(m.cadasterNumber).count += 1;
+  }
+
+  // Egasi pinfl'ini alohida olamiz (isOwner=true yozuvlardan).
+  const owners = await FamilyMember.find({
+    userUid: user.uid,
+    isOwner: true,
+    cadasterNumber: { $in: [...byCadaster.keys()] },
+  })
+    .select("cadasterNumber pinfl surveyUuid")
+    .lean();
+  for (const o of owners) {
+    const g = byCadaster.get(o.cadasterNumber);
+    if (g) {
+      g.ownerPinfl = g.ownerPinfl ?? (o.pinfl ? String(o.pinfl) : null);
+      g.surveyUuid = g.surveyUuid ?? o.surveyUuid;
+    }
+  }
+
+  const queue = [...byCadaster.values()].map((h, index) => ({
+    runId: run._id,
+    queueIndex: index,
+    homeId: String(h.homeId ?? ""),
+    streetId: String(h.streetId ?? ""),
+    streetName: h.streetName ?? null,
+    homeNum: h.homeNum ?? null,
+    cadasterNumber: h.cadasterNumber,
+    ownerPinfl: h.ownerPinfl,
+    surveyUuid: h.surveyUuid ?? null,
+    status: "pending",
+    candidatesCount: h.count,
+    userUid: user.uid,
+  }));
+
+  await RegistrationHome.insertMany(queue);
+
+  await RegistrationRun.updateOne(
+    { _id: run._id },
+    {
+      $set: {
+        homesTotal: queue.length,
+        membersTotal: members.length,
+        stage: "Navbat tayyor",
+      },
+    },
+  );
+
+  return { queued: queue.length };
+};
+
+/**
+ * Bitta FamilyMember'ni platformaga oila a'zosi sifatida POST qiladi.
+ * Davlat bazasidan QAYTA tekshirilmaydi — ma'lumot allaqachon
+ * so'rovnomadan olingan.
+ */
+const postExtraMember = async (user, run, homeRow, member) => {
+  const startedAt = Date.now();
+  const pinfl = member.pinfl ? String(member.pinfl) : null;
+
+  const finish = (fields) =>
+    RegistrationMember.updateOne(
+      { runId: run._id, cadasterNumber: homeRow.cadasterNumber, pinfl },
+      {
+        $set: {
+          runId: run._id,
+          homeRowId: homeRow._id,
+          cadasterNumber: homeRow.cadasterNumber,
+          homeId: homeRow.homeId,
+          fullName: member.fullName,
+          birthDate: member.birthDate,
+          pinfl,
+          userUid: user.uid,
+          durationMs: Date.now() - startedAt,
+          attemptedAt: new Date(),
+          ...fields,
+        },
+      },
+      { upsert: true },
+    );
+
+  // JSHSHIR yo'q — qo'sha olmaymiz.
+  if (!pinfl) {
+    await finish({ status: "skipped", reason: "JSHSHIR yo'q", reasonCode: "pinfl_yoq" });
+    return "skipped";
+  }
+
+  // Telefon: a'zonikisi, bo'lmasa avto-generate.
+  const phone = normalizePhone(member.phone) ?? randomUzPhone();
+
+  const payload = {
+    pinfl: Number(pinfl),
+    full_name: member.fullName,
+    address: null,
+    phone,
+    birth_date: toIsoDate(member.birthDate) ?? member.birthDate,
+    study_level_id: String(pickStudyLevel(yearsOld(member.birthDate), pinfl)),
+    doc_serial: member.docSerial ?? "",
+    doc_number: member.docNumber ?? "",
+    // A'zoning haqiqiy qarindoshligi (so'rovnomadan). Bo'lmasa "Boshqa".
+    relationship: String(member.relationshipCode ?? DEFAULT_RELATIONSHIP),
+    document_type: String(member.documentType ?? 1),
+  };
+
+  const params = {
+    _target: "modal",
+    pinfl,
+    obl_id: user.oblId,
+    area_id: user.areaId,
+    district_id: user.districtId,
+    street_id: homeRow.streetId,
+    survey_uuid: homeRow.surveyUuid,
+    owner_pinfl: homeRow.ownerPinfl,
+  };
+
+  try {
+    const response = await postFamilyMember(payload, params, run);
+    await finish({
+      status: "added",
+      memberId: response?.id != null ? String(response.id) : null,
+      phone,
+      relationshipCode: payload.relationship,
+      sentPayload: payload,
+      sentParams: params,
+      platformResponse: response ?? null,
+      httpStatus: 200,
+      reason: null,
+      reasonCode: null,
+    });
+    pushRunLog(run._id, {
+      level: "success",
+      fullName: member.fullName,
+      message: `Qo'shildi — ${pinfl}`,
+      ms: Date.now() - startedAt,
+    });
+    return "added";
+  } catch (err) {
+    const reason = describeError(err);
+    const reasonCode = reasonCodeOf(reason);
+    const place = parseRegisteredPlace(reason);
+    await finish({
+      status: reasonCode === "allaqachon_mavjud" ? "exists" : "failed",
+      reason,
+      reasonCode,
+      phone,
+      sentPayload: payload,
+      sentParams: params,
+      platformResponse: err.response?.data ?? null,
+      httpStatus: err.response?.status ?? null,
+      ...(place
+        ? {
+            registeredRegion: place.region,
+            registeredMahalla: place.mahalla,
+            movedAway: !sameMahalla(place.mahalla, run.mahallaName),
+          }
+        : {}),
+    });
+    pushRunLog(run._id, {
+      level: reasonCode === "allaqachon_mavjud" ? "skip" : "error",
+      fullName: member.fullName,
+      message: reason,
+    });
+    return reasonCode === "allaqachon_mavjud" ? "exists" : "failed";
+  }
+};
+
+/**
+ * Qo'shimcha a'zolar ishchi (worker).
+ */
+const runExtraWorker = async (user, runDoc) => {
+  const runId = String(runDoc._id);
+  const run = runDoc;
+
+  try {
+    const queued = await RegistrationHome.countDocuments({ runId: run._id });
+    if (!queued) {
+      await prepareExtraQueue(user, run);
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "running",
+          error: null,
+          startedAt: run.startedAt ?? new Date(),
+          heartbeatAt: new Date(),
+        },
+      },
+    );
+
+    const total = await RegistrationHome.countDocuments({ runId: run._id });
+
+    while (true) {
+      const control = await readControl(run);
+      if (control !== "run") {
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          {
+            $set: {
+              status: control === "pause" ? "paused" : "stopped",
+              stage: control === "pause" ? "To'xtatib turildi" : "To'xtatildi",
+              finishedAt: control === "stop" ? new Date() : null,
+            },
+          },
+        );
+        return;
+      }
+
+      const homeRow = await RegistrationHome.findOne({
+        runId: run._id,
+        status: { $in: ["pending", "processing"] },
+      }).sort({ queueIndex: 1 });
+
+      if (!homeRow) break;
+
+      await RegistrationHome.updateOne(
+        { _id: homeRow._id },
+        { $set: { status: "processing", startedAt: new Date() } },
+      );
+
+      await RegistrationRun.updateOne(
+        { _id: run._id },
+        {
+          $set: {
+            stage: `Xonadon ${homeRow.queueIndex + 1}/${total} — ${homeRow.cadasterNumber}`,
+            heartbeatAt: new Date(),
+          },
+        },
+      );
+
+      // Shu kadastrdagi a'zolar (egasidan boshqa).
+      const members = await FamilyMember.find({
+        userUid: user.uid,
+        cadasterNumber: homeRow.cadasterNumber,
+        isOwner: { $ne: true },
+      }).lean();
+
+      let added = 0;
+      let interrupted = false;
+
+      for (const member of members) {
+        if ((await readControlCached(run)) !== "run") {
+          interrupted = true;
+          break;
+        }
+        const r = await postExtraMember(user, run, homeRow, member);
+        if (r === "added") added += 1;
+        await recountRun(run._id);
+      }
+
+      if (interrupted) {
+        await RegistrationHome.updateOne(
+          { _id: homeRow._id },
+          { $set: { status: "pending" } },
+        );
+        continue;
+      }
+
+      await RegistrationHome.updateOne(
+        { _id: homeRow._id },
+        {
+          $set: {
+            status: "done",
+            addedCount: added,
+            finishedAt: new Date(),
+          },
+        },
+      );
+      await recountRun(run._id);
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "done",
+          stage: "Tugadi",
+          finishedAt: new Date(),
+        },
+      },
+    );
+  } catch (err) {
+    console.error("[Qo'shimcha a'zolar] xatolik:", err);
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      { $set: { status: "error", error: err.message, stage: "Xatolik", finishedAt: new Date() } },
+    ).catch(() => {});
+  } finally {
+    activeRuns.delete(runId);
+    clearControlCache(runId);
+    await RegistrationRun.updateOne(
+      { _id: run._id, ownerId: SERVER_ID },
+      { $set: { ownerId: null, ownerName: null } },
+    ).catch(() => {});
+  }
 };
 
 const runWorker = async (user, runDoc) => {

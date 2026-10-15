@@ -3,6 +3,7 @@ import api from "../config/api.js";
 import Citizen from "../models/Citizen.js";
 import Home from "../models/Home.js";
 import RegistrationRun from "../models/RegistrationRun.js";
+import FamilyMember from "../models/FamilyMember.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser, getRequestToken } from "../utils/request-context.js";
@@ -886,6 +887,69 @@ export const randomStart = async (req, res) => {
 
     return res.status(202).json({
       message: `Random rejim boshlandi — ${target} ta muvaffaqiyatli qo'shish maqsad`,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Server xatoligi" });
+  }
+};
+
+/**
+ * POST /api/dashboard/extra-start
+ *
+ * "Qo'shimcha a'zolar" rejimi: platformadan yuklangan (pa_survey_general)
+ * qo'shimcha a'zolarni kadastr bo'yicha oila a'zosi sifatida
+ * platformaga qo'shadi. Telefon yo'q bo'lsa avto-generate qilinadi.
+ */
+export const extraStart = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  try {
+    const token = getRequestToken();
+
+    // Allaqachon ishlayotgan yurish bo'lmasin.
+    const running = await RegistrationRun.find({
+      userUid: user.uid,
+      status: { $in: ["pending", "preparing", "running"] },
+    }).limit(10);
+
+    if (running.find((run) => isRunActiveAnywhere(run))) {
+      return res.status(200).json({ message: "Avval joriy jarayonni to'xtating" });
+    }
+
+    // Yuklangan qo'shimcha a'zolar bormi?
+    const count = await FamilyMember.countDocuments({
+      userUid: user.uid,
+      isOwner: { $ne: true },
+      cadasterNumber: { $nin: [null, ""] },
+    });
+
+    if (!count) {
+      return res.status(404).json({
+        message:
+          "Qo'shimcha a'zolar yuklanmagan — avval \"Qo'shimcha a'zolar\" bo'limida yuklang",
+      });
+    }
+
+    const mahalla = await resolveMahalla(user);
+
+    const run = await RegistrationRun.create({
+      mahallaKey: mahalla?.key ?? "extra",
+      mahallaName: mahalla?.name ?? "Qo'shimcha a'zolar",
+      status: "pending",
+      control: "run",
+      userUid: user.uid,
+      token,
+      oblId: user.oblId,
+      areaId: user.areaId,
+      districtId: user.districtId,
+      extraMode: true,
+    });
+
+    runRegistration(user, run, token);
+
+    return res.status(202).json({
+      message: `Qo'shimcha a'zolar rejimi boshlandi — ${count} ta a'zo`,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Server xatoligi" });

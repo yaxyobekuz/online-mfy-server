@@ -4,6 +4,7 @@ import {
   controlDashboard,
   getDashboardMember,
   randomStart,
+  extraStart,
 } from "../controllers/dashboard.controller.js";
 import { streamDashboard } from "../controllers/dashboard-stream.controller.js";
 import { getStatistics } from "../controllers/statistics.controller.js";
@@ -39,6 +40,7 @@ router.get("/dashboard/stream", streamDashboard);
 router.get("/dashboard/members/:memberId", getDashboardMember);
 router.post("/dashboard/control", controlDashboard);
 router.post("/dashboard/random-start", randomStart);
+ router.post("/dashboard/extra-start", extraStart);
 router.get("/dashboard", getDashboard);
 
 router.get("/statistics", getStatistics);

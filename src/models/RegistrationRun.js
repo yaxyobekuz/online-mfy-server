@@ -128,6 +128,13 @@ const registrationRunSchema = new Schema(
     randomStreetId: { type: String },
     randomSurveyUuid: { type: String },
     randomOwnerPinfl: { type: String },
+
+    // --- Qo'shimcha a'zolar rejimi ---
+    // Platformadan yuklangan (pa_survey_general) "qo'shimcha a'zolar"
+    // ni kadastr bo'yicha oila a'zosi sifatida qo'shadi. Manba —
+    // `citizens` emas, `FamilyMember`. Telefon yo'q bo'lsa
+    // avto-generate qilinadi.
+    extraMode: { type: Boolean, default: false },
   },
   { timestamps: true },
 );
