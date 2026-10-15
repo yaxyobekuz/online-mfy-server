@@ -1,7 +1,6 @@
 import * as XLSX from "xlsx";
 import api from "../config/api.js";
 import FamilyMember from "../models/FamilyMember.js";
-import Citizen from "../models/Citizen.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { withRateLimit, getRateLimitState } from "../utils/rate-limit.js";
 
@@ -73,6 +72,10 @@ const fetchStreets = (user) =>
     }),
   ).then((r) => r.data?.results ?? []);
 
+// Ko'chadagi xonadonlar — `pa_survey_general_info` so'rovnomasidan.
+//
+// DIQQAT: bu so'rovnoma sahifalashni `_page` (1 dan) bilan qiladi,
+// har sahifada 100 ta. `page`/`size` E'TIBORGA OLINMAYDI.
 const fetchStreetHomes = async (user, streetId) => {
   const all = [];
   let page = 1;
@@ -80,15 +83,17 @@ const fetchStreetHomes = async (user, streetId) => {
 
   while ((page - 1) * PAGE_SIZE < total) {
     const response = await limited(user.uid, () =>
-      api.get("/api/v1/survey_homes_street/cache/data", {
+      api.get("/web/v1/tables/pa_survey_general_info/data", {
         params: {
+          _level: 1,
           obl_id: user.oblId,
           area_id: user.areaId,
           district_id: user.districtId,
           street_id: streetId,
-          surveyed: 0,
-          page,
-          size: PAGE_SIZE,
+          _mid: 664,
+          __tab: "pa_survey_general_info",
+          __type: "table",
+          _page: page,
         },
       }),
     );
@@ -101,16 +106,25 @@ const fetchStreetHomes = async (user, streetId) => {
     if (!results.length) break;
   }
 
-  return all;
+  // Maydonlarni umumiy shaklga keltiramiz (scan loop shu nomlarni
+  // kutadi).
+  return all.map((h) => ({
+    id: h.id,
+    uuid: h.uuid,
+    home_num: h.home_num,
+    full_name: h.full_name,
+    pinfl: h.pinfl,
+    mobile_phone: h.mobile_phone,
+    ownership_type: h.ownership,
+  }));
 };
 
-// Xonadon so'rovnomasi — survey_uuid VA egasining ma'lumoti shu
-// yerdan. Egasi a'zolar ro'yxatida bo'lmasligi mumkin, formadagi
-// qiymat esa xonadon ro'yxatidagidan ("- " kabi joy to'ldirgich)
-// ishonchliroq.
+// Xonadon so'rovnomasi — `pa_survey_v5`. Kadastr raqami, survey_uuid
+// va egasining ma'lumoti shu yerdan olinadi (xonadonlar ro'yxatida
+// kadastr yo'q).
 const fetchHomeForm = (user, homeId) =>
   limited(user.uid, () =>
-    api.get(`/web/v1/forms/survey_homes/${homeId}`, {
+    api.get(`/web/v1/forms/pa_survey_v5/${homeId}`, {
       params: {
         obl_id: user.oblId,
         area_id: user.areaId,
@@ -136,15 +150,30 @@ const fetchFamilyList = async (user, streetId, surveyUuid) => {
     survey_uuid: surveyUuid,
   };
 
-  const fresh = await limited(user.uid, () =>
+  // Asosiy: pa_survey_v3_family (telefon ham beradi).
+  const primary = await limited(user.uid, () =>
+    api.get("/web/v1/tables/pa_survey_v3_family/data", { params }),
+  )
+    .then((r) => r.data?.results ?? [])
+    .catch(() => []);
+
+  if (primary.length) return { source: "v5", members: primary };
+
+  // Zaxira 1: pa_survey_family (eski yangi-survey nomi).
+  const alt = await limited(user.uid, () =>
     api.get("/web/v1/tables/pa_survey_family/data", { params }),
-  ).then((r) => r.data?.results ?? []);
+  )
+    .then((r) => r.data?.results ?? [])
+    .catch(() => []);
 
-  if (fresh.length) return { source: "v5", members: fresh };
+  if (alt.length) return { source: "v5", members: alt };
 
+  // Zaxira 2: eng eski survey_homes_family.
   const legacy = await limited(user.uid, () =>
     api.get("/web/v1/tables/survey_homes_family/data", { params }),
-  ).then((r) => r.data?.results ?? []);
+  )
+    .then((r) => r.data?.results ?? [])
+    .catch(() => []);
 
   return { source: "legacy", members: legacy };
 };
@@ -226,9 +255,11 @@ const runScan = async (user) => {
         streetId: String(street.id),
         streetName: street.name,
         homeNum: home.home_num,
-        cadasterNumber: home.cadaster_number ?? null,
-        // Egasi — a'zolar ro'yxatida (ayniqsa yangi v5 da) bo'lmaydi,
-        // shuning uchun xonadon ro'yxatidan olinadi.
+        // Kadastr `pa_survey_v5` formasidan keyin biriktiriladi.
+        cadasterNumber: null,
+        // survey_uuid xonadonlar ro'yxatida ham bor (zaxira).
+        surveyUuid: home.uuid ?? null,
+        // Egasi — xonadon ro'yxatidan.
         ownerFullName: home.full_name ?? null,
         ownerPinfl: home.pinfl != null ? String(home.pinfl) : null,
         ownerPhone: home.mobile_phone ?? null,
@@ -266,20 +297,20 @@ const runScan = async (user) => {
       continue;
     }
 
-    const surveyUuid = form?.survey_uuid ?? form?.uuid ?? null;
+    // survey_uuid: formadagi `uuid` (yangi survey) yoki xonadonlar
+    // ro'yxatidagi `uuid`.
+    const surveyUuid = form?.uuid ?? form?.survey_uuid ?? home.surveyUuid ?? null;
     if (!surveyUuid) continue;
 
-    // Egasi ma'lumoti. Asosiy manba — XONADON RO'YXATI (`home.owner*`):
-    // u har xonadon uchun bir so'rovda keladi va so'rovnoma
-    // versiyasiga bog'liq emas. `survey_homes` formasi v5
-    // xonadonlarda egani bo'sh beradi, `pa_survey_v5` esa boshqa
-    // id talab qiladi — shuning uchun ularga tayanmaymiz. Forma
-    // qiymati faqat ro'yxatda "- " joy to'ldirgich bo'lsa ishga
-    // tushadi.
+    // KADASTR — faqat `pa_survey_v5` formasida bor (xonadonlar
+    // ro'yxatida yo'q). Shuning uchun shu yerda biriktiramiz.
     const clean = (value) => {
       const text = String(value ?? "").trim();
       return text && text !== "-" ? text : null;
     };
+    home.cadasterNumber = clean(form?.cadaster_number) ?? home.cadasterNumber;
+
+    // Egasi ma'lumoti — xonadonlar ro'yxatidan, bo'sh bo'lsa formadan.
     const ownerFullName =
       clean(home.ownerFullName) ?? clean(form?.full_name);
     const ownerPinfl = clean(home.ownerPinfl) ?? clean(form?.pinfl);
@@ -474,36 +505,11 @@ export const getHomeMembersScanStatus = async (req, res) => {
 };
 
 /**
- * "QO'SHIMCHA A'ZOLAR" filtri.
+ * GET /api/home-members — yuklangan "qo'shimcha a'zolar" ro'yxati.
  *
- * Bu sahifaning maqsadi: umumiy fuqarolar bazasida ("Jami aholi",
- * `citizens`) YO'Q bo'lgan a'zolarni ajratib ko'rsatish. Shunday
- * odamlar platformada bor, lekin bazaga tushmagan — ularni qo'lda
- * qo'shish kerak.
- *
- * Mantiq: a'zoning JSHSHIR'i `citizens` da bo'lsa — u "jami aholi"
- * da bor, ko'rsatilmaydi. JSHSHIR yo'q yoki `citizens` da topilmasa —
- * qo'shimcha a'zo.
- *
- * Qaytaradi: SHU foydalanuvchining `citizens` da MAVJUD bo'lgan
- * a'zo JSHSHIR'lari to'plami (filtrda chetlab o'tish uchun).
- */
-const existingCitizenPinfls = async (userUid) => {
-  const pinfls = await FamilyMember.distinct("pinfl", {
-    userUid,
-    pinfl: { $nin: [null, ""] },
-  });
-
-  if (!pinfls.length) return new Set();
-
-  const found = await Citizen.distinct("pinfl", { pinfl: { $in: pinfls } });
-  return new Set(found.map((p) => String(p)));
-};
-
-/**
- * GET /api/home-members — QO'SHIMCHA a'zolarni sahifalab beradi.
- *
- * Faqat "Jami aholi" (citizens) bazasida YO'Q bo'lgan a'zolar.
+ * Bu a'zolar `pa_survey_general` so'rovnomasidan olinadi va "Jami
+ * aholi" (citizens Excel bazasi) dan farq qilishi mumkin — shuning
+ * uchun "qo'shimcha". Hammasi ko'rsatiladi.
  */
 export const getHomeMembers = async (req, res) => {
   const user = getRequestUser();
@@ -513,29 +519,12 @@ export const getHomeMembers = async (req, res) => {
   const size = Math.min(100, Math.max(1, Number(req.query.size) || 50));
   const search = String(req.query.search ?? "").trim();
 
-  // "Jami aholi" da MAVJUD bo'lgan JSHSHIR'lar — ularni chetlab
-  // o'tamiz, faqat qo'shimchalar qoladi.
-  const existing = await existingCitizenPinfls(user.uid);
-
-  const filter = {
-    userUid: user.uid,
-    // JSHSHIR yo'q (bazada topib bo'lmaydi) YOKI citizens da yo'q.
-    $and: [
-      {
-        $or: [
-          { pinfl: { $in: [null, ""] } },
-          { pinfl: { $nin: [...existing] } },
-        ],
-      },
-    ],
-  };
+  const filter = { userUid: user.uid };
 
   if (search) {
     // Kirill/lotin FIO, JSHSHIR yoki kadastr bo'yicha.
     const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    filter.$and.push({
-      $or: [{ fullName: rx }, { pinfl: rx }, { cadasterNumber: rx }],
-    });
+    filter.$or = [{ fullName: rx }, { pinfl: rx }, { cadasterNumber: rx }];
   }
 
   const [total, items] = await Promise.all([
@@ -577,22 +566,14 @@ const RELATIONSHIP_LABELS = {
 const DOCUMENT_TYPE_LABELS = { 1: "Pasport / ID-karta", 2: "Guvohnoma" };
 
 /**
- * GET /api/home-members/export — QO'SHIMCHA a'zolarni Excel qilib
- * beradi (umumiy bazada yo'q bo'lganlar).
+ * GET /api/home-members/export — qo'shimcha a'zolarni Excel qilib
+ * beradi.
  */
 export const exportHomeMembers = async (req, res) => {
   const user = getRequestUser();
   if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
 
-  const existing = await existingCitizenPinfls(user.uid);
-
-  const rows = await FamilyMember.find({
-    userUid: user.uid,
-    $or: [
-      { pinfl: { $in: [null, ""] } },
-      { pinfl: { $nin: [...existing] } },
-    ],
-  })
+  const rows = await FamilyMember.find({ userUid: user.uid })
     .sort({ cadasterNumber: 1, homeId: 1, _id: 1 })
     .lean();
 
