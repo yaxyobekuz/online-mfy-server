@@ -452,7 +452,7 @@ export const getDashboard = async (req, res) => {
     // Shu tokenga tegishli ko'rsatiladigan yurish.
     const run = await pickVisibleRun(user.uid);
 
-    const [stats, members, currentHome] = await Promise.all([
+    const [stats, members, currentHome, randomTotalRows] = await Promise.all([
       collectStats(run, user.uid),
       run
         ? RegistrationMember.find({
@@ -477,9 +477,19 @@ export const getDashboard = async (req, res) => {
             .sort({ queueIndex: 1 })
             .lean()
         : null,
+
+      // Barcha RANDOM yurishlar bo'yicha JAMI muvaffaqiyatli
+      // qo'shilgan — faqat random rejim ko'rinayotganda kerak.
+      run?.randomMode
+        ? RegistrationRun.aggregate([
+            { $match: { userUid: user.uid, randomMode: true } },
+            { $group: { _id: null, total: { $sum: "$randomAdded" } } },
+          ])
+        : Promise.resolve([]),
     ]);
 
     const isActive = run ? isRunActiveAnywhere(run) : false;
+    const randomAddedTotal = randomTotalRows[0]?.total ?? 0;
 
     return res.status(200).json({
       user: { username: user.username ?? null },
@@ -499,6 +509,8 @@ export const getDashboard = async (req, res) => {
             randomMode: run.randomMode ?? false,
             randomTarget: run.randomTarget ?? 0,
             randomAdded: run.randomAdded ?? 0,
+            // Barcha random yurishlar bo'yicha jami.
+            randomAddedTotal,
           }
         : null,
       stats,

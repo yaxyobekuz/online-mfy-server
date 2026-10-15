@@ -1,5 +1,6 @@
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
+import RegistrationRun from "../models/RegistrationRun.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { getRateLimitState } from "../utils/rate-limit.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
@@ -75,6 +76,16 @@ export const streamDashboard = async (req, res) => {
         .lean(),
     ]);
 
+    // Barcha random yurishlar bo'yicha jami muvaffaqiyatli.
+    const randomAddedTotal = run.randomMode
+      ? (
+          await RegistrationRun.aggregate([
+            { $match: { userUid: user.uid, randomMode: true } },
+            { $group: { _id: null, total: { $sum: "$randomAdded" } } },
+          ])
+        )[0]?.total ?? 0
+      : 0;
+
     const isActive = isRunActiveAnywhere(run);
 
     return {
@@ -89,6 +100,7 @@ export const streamDashboard = async (req, res) => {
         randomMode: run.randomMode ?? false,
         randomTarget: run.randomTarget ?? 0,
         randomAdded: run.randomAdded ?? 0,
+        randomAddedTotal,
       },
       stats,
       currentHome: currentHome
