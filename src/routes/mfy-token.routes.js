@@ -4,12 +4,14 @@ import {
   addMfyToken,
   updateMfyToken,
   setMfyVisibility,
+  getMfyTokenValue,
   deleteMfyToken,
 } from "../controllers/mfy-token.controller.js";
 
 const router = Router();
 
 router.get("/mfy-tokens", listMfyTokens);
+router.get("/mfy-tokens/:uid/token", getMfyTokenValue);
 router.post("/mfy-tokens", addMfyToken);
 router.put("/mfy-tokens/:uid", updateMfyToken);
 router.patch("/mfy-tokens/:uid/visibility", setMfyVisibility);

@@ -173,6 +173,23 @@ export const setMfyVisibility = async (req, res) => {
 };
 
 /**
+ * GET /api/mfy-tokens/:uid/token
+ *
+ * MFY ning XOM tokenini qaytaradi — panelda "nusxalash" tugmasi
+ * uchun. Butun API serverning yagona paroli ortida, shuning uchun
+ * faqat kirgan admin o'qiy oladi. Token boshqa joyda (ro'yxatda)
+ * hech qachon qaytarilmaydi.
+ */
+export const getMfyTokenValue = async (req, res) => {
+  const { uid } = req.params;
+
+  const doc = await MfyToken.findOne({ uid }).select("+token").lean();
+  if (!doc) return res.status(404).json({ message: "Bu MFY topilmadi" });
+
+  return res.status(200).json({ uid: doc.uid, token: doc.token });
+};
+
+/**
  * DELETE /api/mfy-tokens/:uid
  *
  * MFY tokenini o'chiradi va shu MFY bo'yicha har qanday jarayonni
