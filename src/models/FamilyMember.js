@@ -45,6 +45,12 @@ const familyMemberSchema = new Schema(
     // Xonadon egasimi (ro'yxatda relationship = "хонадон эгаси").
     isOwner: { type: Boolean, default: false },
 
+    // JSHSHIR umumiy fuqarolar bazasida (Citizen) bormi. Egalar
+    // POST uchun saqlanadi, lekin bazada bo'lsa sahifada ko'rsatilmaydi
+    // ("Qo'shimcha a'zolar" = bazada YO'Qlar). Haqiqiy a'zolar bazada
+    // bo'lsa umuman saqlanmaydi, shuning uchun ularda bu doim false.
+    inBase: { type: Boolean, default: false },
+
     // Tug'ilgan sana ("DD.MM.YYYY")
     birthDate: { type: String },
 

@@ -2325,10 +2325,16 @@ const prepareExtraQueue = async (user, run) => {
 
   // Xonadon egasini (relationship = "хонадон эгаси") POST qilmaymiz —
   // u allaqachon platformada egasi. Faqat a'zolar.
+  //
+  // Guruhlash KADASTR bo'yicha emas, HOMEID bo'yicha: kadastr `pa_survey_v5`
+  // formasida ba'zan bo'sh qaytadi (masalan APOG'ON MFY), lekin POST uchun
+  // kadastr umuman kerak emas — street_id + survey_uuid + owner_pinfl yetadi.
+  // homeId esa har doim bor va xonadonning asl kimligi. Shuning uchun kadastr
+  // yo'qligi yuklashni to'xtatmasligi kerak.
   const members = await FamilyMember.find({
     userUid: user.uid,
     isOwner: { $ne: true },
-    cadasterNumber: { $nin: [null, ""] },
+    homeId: { $nin: [null, ""] },
   }).lean();
 
   if (!members.length) {
@@ -2337,42 +2343,47 @@ const prepareExtraQueue = async (user, run) => {
     );
   }
 
-  // Kadastr bo'yicha guruhlash — har xonadon bitta navbat yozuvi.
-  const byCadaster = new Map();
+  // HomeId bo'yicha guruhlash — har xonadon bitta navbat yozuvi.
+  const byHome = new Map();
   for (const m of members) {
-    if (!byCadaster.has(m.cadasterNumber)) {
-      byCadaster.set(m.cadasterNumber, {
-        cadasterNumber: m.cadasterNumber,
+    const key = String(m.homeId);
+    if (!byHome.has(key)) {
+      byHome.set(key, {
         homeId: m.homeId,
+        // Kadastr bo'lsa — ko'rsatkich/belgi uchun; bo'lmasa homeId.
+        cadasterNumber: m.cadasterNumber || null,
         streetId: m.streetId,
         streetName: m.streetName,
         homeNum: m.homeNum,
         surveyUuid: m.surveyUuid,
-        // Egasi pinfl — shu kadastrdagi egasidan.
+        // Egasi pinfl — shu xonadon egasidan.
         ownerPinfl: null,
         count: 0,
       });
     }
-    byCadaster.get(m.cadasterNumber).count += 1;
+    const g = byHome.get(key);
+    g.cadasterNumber = g.cadasterNumber ?? (m.cadasterNumber || null);
+    g.surveyUuid = g.surveyUuid ?? m.surveyUuid;
+    g.count += 1;
   }
 
-  // Egasi pinfl'ini alohida olamiz (isOwner=true yozuvlardan).
+  // Egasi pinfl'ini alohida olamiz (isOwner=true yozuvlardan) — homeId bo'yicha.
   const owners = await FamilyMember.find({
     userUid: user.uid,
     isOwner: true,
-    cadasterNumber: { $in: [...byCadaster.keys()] },
+    homeId: { $in: [...byHome.keys()] },
   })
-    .select("cadasterNumber pinfl surveyUuid")
+    .select("homeId pinfl surveyUuid")
     .lean();
   for (const o of owners) {
-    const g = byCadaster.get(o.cadasterNumber);
+    const g = byHome.get(String(o.homeId));
     if (g) {
       g.ownerPinfl = g.ownerPinfl ?? (o.pinfl ? String(o.pinfl) : null);
       g.surveyUuid = g.surveyUuid ?? o.surveyUuid;
     }
   }
 
-  const queue = [...byCadaster.values()].map((h, index) => ({
+  const queue = [...byHome.values()].map((h, index) => ({
     runId: run._id,
     queueIndex: index,
     homeId: String(h.homeId ?? ""),
@@ -2414,7 +2425,9 @@ const postExtraMember = async (user, run, homeRow, member) => {
 
   const finish = (fields) =>
     RegistrationMember.updateOne(
-      { runId: run._id, cadasterNumber: homeRow.cadasterNumber, pinfl },
+      // Dedup kaliti: kadastr bo'sh bo'lishi mumkin, shuning uchun homeId
+      // bo'yicha (har xonadon aniq bitta homeId).
+      { runId: run._id, homeId: homeRow.homeId, pinfl },
       {
         $set: {
           runId: run._id,
@@ -2577,16 +2590,17 @@ const runExtraWorker = async (user, runDoc) => {
         { _id: run._id },
         {
           $set: {
-            stage: `Xonadon ${homeRow.queueIndex + 1}/${total} — ${homeRow.cadasterNumber}`,
+            stage: `Xonadon ${homeRow.queueIndex + 1}/${total} — ${homeRow.cadasterNumber ?? homeRow.homeNum ?? homeRow.homeId}`,
             heartbeatAt: new Date(),
           },
         },
       );
 
-      // Shu kadastrdagi a'zolar (egasidan boshqa).
+      // Shu xonadondagi a'zolar (egasidan boshqa). homeId bo'yicha —
+      // kadastr bo'sh bo'lishi mumkin, homeId esa har doim bor.
       const members = await FamilyMember.find({
         userUid: user.uid,
-        cadasterNumber: homeRow.cadasterNumber,
+        homeId: homeRow.homeId,
         isOwner: { $ne: true },
       }).lean();
 

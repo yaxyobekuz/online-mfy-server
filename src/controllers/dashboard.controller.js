@@ -947,11 +947,12 @@ export const extraStart = async (req, res) => {
       return res.status(200).json({ message: "Avval joriy jarayonni to'xtating" });
     }
 
-    // Yuklangan qo'shimcha a'zolar bormi?
+    // Yuklangan qo'shimcha a'zolar bormi? Kadastr emas, homeId tekshiriladi:
+    // kadastr ba'zi MFY larda bo'sh qaytadi, lekin POST uchun kerak emas.
     const count = await FamilyMember.countDocuments({
       userUid: user.uid,
       isOwner: { $ne: true },
-      cadasterNumber: { $nin: [null, ""] },
+      homeId: { $nin: [null, ""] },
     });
 
     if (!count) {

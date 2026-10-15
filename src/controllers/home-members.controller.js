@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import api from "../config/api.js";
 import FamilyMember from "../models/FamilyMember.js";
+import Citizen from "../models/Citizen.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { withRateLimit, getRateLimitState } from "../utils/rate-limit.js";
 
@@ -228,6 +229,25 @@ const runScan = async (user) => {
 
   setScan(user.uid, { streetsTotal: streets.length });
 
+  // "Qo'shimcha a'zolar" = umumiy fuqarolar bazasida (Citizen) HALI
+  // yo'q bo'lganlar. Shuning uchun bazadagi barcha JSHSHIR'larni bir
+  // marta Set'ga yig'amiz: a'zoni saqlashdan oldin shu bilan solishtirib,
+  // bazada bor bo'lganini (egasini ham) ro'yxatga umuman qo'shmaymiz.
+  //
+  // JSHSHIRsiz a'zolar (sertifikat/tug'ilish guvohnomasi bo'yicha) bazada
+  // aniqlanmaydi — ular "yo'q" deb hisoblanadi va saqlanaveradi.
+  setScan(user.uid, { stage: "Umumiy baza JSHSHIR'lari o'qilmoqda" });
+  const knownPinfls = new Set();
+  for (const pinfl of await Citizen.distinct("pinfl")) {
+    if (pinfl) knownPinfls.add(String(pinfl).trim());
+  }
+
+  // Bazada bor JSHSHIR'mi? (bo'sh/yo'q bo'lsa — "qo'shimcha" deb qoladi).
+  const inCitizenBase = (pinfl) => {
+    const key = pinfl != null ? String(pinfl).trim() : "";
+    return key !== "" && knownPinfls.has(key);
+  };
+
   // Avval barcha xonadonlarni yig'amiz (son aniq ko'rinsin).
   const homes = [];
 
@@ -334,9 +354,13 @@ const runScan = async (user) => {
     // o'tkazamiz.
     const listHasOwner = list.some((m) => isOwnerRelationship(m.relationship));
 
+    // Egasini HAR DOIM saqlaymiz — u "qo'shimcha a'zo" sifatida
+    // ro'yxatga OLINMAYDI (isOwner=true, POST qilinmaydi), lekin uning
+    // JSHSHIR'i xonadonning a'zolarini kiritishda `owner_pinfl` sifatida
+    // kerak. Shuning uchun egasi bazada bo'lsa ham o'chirilmaydi;
+    // "faqat bazada yo'qlar" filtri faqat haqiqiy a'zolarga tegishli.
+    const ownerMemberId = `owner:${home.homeId}`;
     if (ownerPinfl || ownerFullName) {
-      const ownerMemberId = `owner:${home.homeId}`;
-
       await FamilyMember.updateOne(
         { userUid: user.uid, memberId: ownerMemberId },
         {
@@ -352,6 +376,9 @@ const runScan = async (user) => {
             relationship: "хонадон эгаси",
             relationshipCode: null,
             isOwner: true,
+            // Bazada bo'lsa — saqlanadi (owner_pinfl kerak), lekin
+            // sahifada ko'rsatilmaydi.
+            inBase: inCitizenBase(ownerPinfl),
             birthDate: clean(form?.birth_date),
             pinfl: ownerPinfl,
             phone: ownerPhone,
@@ -371,9 +398,6 @@ const runScan = async (user) => {
     const realMembers = listHasOwner
       ? list.filter((m) => !isOwnerRelationship(m.relationship))
       : list;
-
-    membersFound += realMembers.length;
-    setScan(user.uid, { membersFound });
 
     for (const member of realMembers) {
       if (stopFlags.has(user.uid)) break;
@@ -397,6 +421,21 @@ const runScan = async (user) => {
         detail = null;
       }
 
+      // A'zo umumiy bazada bo'lsa — "qo'shimcha" emas, o'tkazamiz.
+      // Oldingi (filtrsiz) skandan qolgan nusxa bo'lsa, o'chiramiz.
+      const memberPinfl =
+        member.pinfl != null
+          ? String(member.pinfl)
+          : detail?.pinfl != null
+            ? String(detail.pinfl)
+            : null;
+      if (inCitizenBase(memberPinfl)) {
+        await FamilyMember.deleteOne({ userUid: user.uid, memberId });
+        continue;
+      }
+
+      membersFound += 1;
+
       const doc = {
         memberId,
         homeId: home.homeId,
@@ -411,12 +450,7 @@ const runScan = async (user) => {
           detail?.relationship != null ? Number(detail.relationship) : null,
         isOwner: false,
         birthDate: member.birth_date ?? detail?.birth_date ?? null,
-        pinfl:
-          member.pinfl != null
-            ? String(member.pinfl)
-            : detail?.pinfl != null
-              ? String(detail.pinfl)
-              : null,
+        pinfl: memberPinfl,
         phone: member.phone ?? detail?.phone ?? null,
         docSerial: detail?.doc_serial || null,
         docNumber: detail?.doc_number || null,
@@ -519,7 +553,9 @@ export const getHomeMembers = async (req, res) => {
   const size = Math.min(100, Math.max(1, Number(req.query.size) || 50));
   const search = String(req.query.search ?? "").trim();
 
-  const filter = { userUid: user.uid };
+  // Bazada bor (inBase) yozuvlar faqat POST uchun saqlanadi — sahifada
+  // ko'rsatilmaydi: "Qo'shimcha a'zolar" = umumiy bazada YO'Qlar.
+  const filter = { userUid: user.uid, inBase: { $ne: true } };
 
   if (search) {
     // Kirill/lotin FIO, JSHSHIR yoki kadastr bo'yicha.
@@ -573,7 +609,7 @@ export const exportHomeMembers = async (req, res) => {
   const user = getRequestUser();
   if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
 
-  const rows = await FamilyMember.find({ userUid: user.uid })
+  const rows = await FamilyMember.find({ userUid: user.uid, inBase: { $ne: true } })
     .sort({ cadasterNumber: 1, homeId: 1, _id: 1 })
     .lean();
 
