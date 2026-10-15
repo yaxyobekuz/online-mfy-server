@@ -72,10 +72,28 @@ export const pickVisibleRun = async (uid) => {
 
   if (!runs.length) return null;
 
+  // 1. Hozir ishlayotgani — o'shani ko'rsatamiz.
   const active = runs.find((run) => isRunActiveAnywhere(run));
   if (active) return active;
 
-  return runs.find((run) => !run.randomMode) ?? runs[0];
+  // 2. Ishlayotgani yo'q — ASOSIY (kadastr) yurish ustun.
+  //
+  // Diqqat: kadastr yurish faqat BITTA bo'ladi va u eng eskisi
+  // bo'lishi mumkin (ko'p marta random boshlangan bo'lsa). Shuning
+  // uchun uni `limit(10)` oynasidan emas, alohida so'rov bilan
+  // olamiz — aks holda panel random ko'rinishida qotib qolardi.
+  const cadaster = await RegistrationRun.findOne({
+    userUid: uid,
+    randomMode: { $ne: true },
+    extraMode: { $ne: true },
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (cadaster) return cadaster;
+
+  // 3. Kadastr yurish umuman bo'lmasa — nima bo'lsa o'shanisi.
+  return runs[0];
 };
 
 /**
