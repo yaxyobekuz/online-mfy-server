@@ -40,7 +40,7 @@ const FEED_LIMIT = 40;
 
 // Xonadon shu holatlarda ishlab bo'lingan hisoblanadi: undagi hamma
 // odam ko'rib chiqilgan.
-const FINISHED_HOME_STATUSES = ["done", "partial", "skipped", "failed"];
+export const FINISHED_HOME_STATUSES = ["done", "partial", "skipped", "failed"];
 
 const requireUser = (res) => {
   const user = getRequestUser();
@@ -180,41 +180,80 @@ const resolveMahalla = async (user) => {
 };
 
 /**
- * Maketdagi 5 ta KPI kartasi uchun ko'rsatkichlar.
+ * Odamning eng yaxshi natijasi (kichik son — kamroq muvaffaqiyat):
+ *   4 — biz qo'shdik (added)
+ *   3 — platformada allaqachon bor edi (exists)
+ *   2 — boshqa MFY da ro'yxatda (ko'chib ketgan, movedAway)
+ *   1 — kirmadi (failed/skipped)
+ *   0 — hali urinilmagan
  *
- * "Jami aholi" — navbatdagi xonadonlarga tegishli fuqarolarning
- * ANIQ soni, taxmin emas.
+ * "added" va "exists" ajratilgan: ikkalasi ham "odam bazada", lekin
+ * biri bizning ishimiz, ikkinchisi avvaldan turgani. "movedAway" esa
+ * rad etilganlardan ajratiladi: bu xato emas — odam shunchaki boshqa
+ * mahallada yashaydi, mahalla xodimi uchun bu alohida ma'noli
+ * ko'rsatkich.
  *
- * Nega bu muhim: avval qolganlar o'rtacha bilan baholanardi
- * (`urinilgan / tugagan_xonadon * qolgan_xonadon`). O'rtacha esa
- * har xonadondan keyin siljiydi, natijada "jami" raqami doimiy
- * o'zgarib turardi — 990, 987, 991... Foydalanuvchi aniq sonni
- * bila olmasdi va jarayon noto'g'ri ketayotgandek ko'rinardi.
- *
- * Endi son manbadan to'g'ridan-to'g'ri sanaladi: ishchi odamlarni
- * aynan `cadasterNumber` bo'yicha topadi (`registration-worker.js`),
- * shuning uchun navbatdagi kadastrlarga tegishli fuqarolarni
- * sanash kifoya. Bu son jarayon davomida O'ZGARMAYDI.
- *
- * Diqqat: butun fuqarolar bazasi emas, faqat SHU yurish navbati —
- * aks holda tumandagi 185 ming odam ko'rinib, foiz ma'nosiz
- * bo'lib qolardi.
+ * Kartochkalar (collectStats) va ro'yxatlar (dashboard-list) shu
+ * ifodalardan foydalanadi — qoida bir joyda turadi.
  */
-export const collectStats = async (run, userUid) => {
-  const empty = {
-    peopleTotal: 0,
-    added: 0,
-    exists: 0,
-    movedAway: 0,
-    failed: 0,
-    pending: 0,
-    homesTotal: 0,
-    homesDone: 0,
-    percent: 0,
-  };
+export const MEMBER_BEST_EXPR = {
+  $switch: {
+    branches: [
+      { case: { $eq: ["$status", "added"] }, then: 4 },
+      { case: { $eq: ["$status", "exists"] }, then: 3 },
+      // Rad etilgan, lekin sababi "boshqa MFY da bor".
+      {
+        case: {
+          $and: [
+            { $in: ["$status", ["failed", "skipped"]] },
+            { $eq: ["$movedAway", true] },
+          ],
+        },
+        then: 2,
+      },
+      { case: { $in: ["$status", ["failed", "skipped"]] }, then: 1 },
+    ],
+    default: 0,
+  },
+};
 
-  if (!run) return empty;
+// Odamning kaliti: tasdiqlangan JSHSHIR, bo'lmasa Excel'dagi, bo'lmasa
+// F.I.Sh. (guvohnomali bolalarda JSHSHIR bo'lmaydi).
+export const MEMBER_KEY_EXPR = {
+  $ifNull: ["$verifiedPinfl", { $ifNull: ["$pinfl", "$fullName"] }],
+};
 
+/**
+ * Odamlar uchun YAKUNIY urinishlar filtri.
+ *
+ * FAQAT tugagan kadastrlardagi urinishlar: pending kadastrdagi urinish
+ * hali yakuniy emas, shuning uchun chiqarib tashlanadi.
+ */
+export const memberScopeMatch = ({ runIds, randomRunIds, pendingCadasters }) => ({
+  $or: [
+    {
+      // Kadastr yurishlaridagi yakuniy urinishlar.
+      runId: { $in: runIds },
+      ...(pendingCadasters.length
+        ? { cadasterNumber: { $nin: pendingCadasters } }
+        : {}),
+    },
+    {
+      // Random rejimda QO'SHILGANLAR — ular ham "added".
+      runId: { $in: randomRunIds },
+      status: "added",
+    },
+  ],
+});
+
+/**
+ * Shu MFY ning hisob doirasi: qaysi yurishlar, qaysi xonadonlar
+ * tugagan va qaysilari hali kutilmoqda.
+ *
+ * Kartochka sonlari va ro'yxatlar AYNAN shu natijadan olinadi —
+ * shuning uchun ular doim bir-biriga mos keladi.
+ */
+export const resolveScope = async (run, userUid) => {
   // Hisob BITTA yurish bo'yicha emas, shu MFY ning HAMMA yurishlari
   // bo'yicha ketadi: ilgari tugagan yurishdan keyin "Boshlash"
   // bosilsa yangi bo'sh yurish yaratilardi va panel faqat o'shani
@@ -266,6 +305,47 @@ export const collectStats = async (run, userUid) => {
   const pendingCadasters = allCadasters.filter(
     (cadaster) => !FINISHED_HOME_STATUSES.includes(bestStatus.get(cadaster)),
   );
+  return { runIds, randomRunIds, bestStatus, allCadasters, pendingCadasters };
+};
+
+/**
+ * Maketdagi 5 ta KPI kartasi uchun ko'rsatkichlar.
+ *
+ * "Jami aholi" — navbatdagi xonadonlarga tegishli fuqarolarning
+ * ANIQ soni, taxmin emas.
+ *
+ * Nega bu muhim: avval qolganlar o'rtacha bilan baholanardi
+ * (`urinilgan / tugagan_xonadon * qolgan_xonadon`). O'rtacha esa
+ * har xonadondan keyin siljiydi, natijada "jami" raqami doimiy
+ * o'zgarib turardi — 990, 987, 991... Foydalanuvchi aniq sonni
+ * bila olmasdi va jarayon noto'g'ri ketayotgandek ko'rinardi.
+ *
+ * Endi son manbadan to'g'ridan-to'g'ri sanaladi: ishchi odamlarni
+ * aynan `cadasterNumber` bo'yicha topadi (`registration-worker.js`),
+ * shuning uchun navbatdagi kadastrlarga tegishli fuqarolarni
+ * sanash kifoya. Bu son jarayon davomida O'ZGARMAYDI.
+ *
+ * Diqqat: butun fuqarolar bazasi emas, faqat SHU yurish navbati —
+ * aks holda tumandagi 185 ming odam ko'rinib, foiz ma'nosiz
+ * bo'lib qolardi.
+ */
+export const collectStats = async (run, userUid) => {
+  const empty = {
+    peopleTotal: 0,
+    added: 0,
+    exists: 0,
+    movedAway: 0,
+    failed: 0,
+    pending: 0,
+    homesTotal: 0,
+    homesDone: 0,
+    percent: 0,
+  };
+
+  if (!run) return empty;
+
+  const scope = await resolveScope(run, userUid);
+  const { allCadasters, pendingCadasters } = scope;
 
   const homesTotal = allCadasters.length;
   const homesDone = homesTotal - pendingCadasters.length;
@@ -302,62 +382,12 @@ export const collectStats = async (run, userUid) => {
     // chiqarib tashlanadi — odam "kutilmoqda" bo'lib qoladi.
     RegistrationMember.aggregate([
       {
-        $match: {
-          $or: [
-            {
-              // Kadastr yurishlaridagi yakuniy urinishlar.
-              runId: { $in: runIds },
-              ...(pendingCadasters.length
-                ? { cadasterNumber: { $nin: pendingCadasters } }
-                : {}),
-            },
-            {
-              // Random rejimda QO'SHILGANLAR — ular ham "added".
-              runId: { $in: randomRunIds },
-              status: "added",
-            },
-          ],
-        },
+        $match: memberScopeMatch(scope),
       },
       {
         $group: {
-          _id: {
-            $ifNull: ["$verifiedPinfl", { $ifNull: ["$pinfl", "$fullName"] }],
-          },
-          // Odamning eng yaxshi natijasi:
-          //   4 — biz qo'shdik (added)
-          //   3 — platformada allaqachon bor edi (exists)
-          //   2 — boshqa MFY da ro'yxatda (ko'chib ketgan, movedAway)
-          //   1 — kirmadi (failed/skipped)
-          //   0 — hali urinilmagan
-          //
-          // "added" va "exists" ajratilgan: ikkalasi ham "odam
-          // bazada", lekin biri bizning ishimiz, ikkinchisi avvaldan
-          // turgani. "movedAway" esa rad etilganlardan ajratiladi:
-          // bu xato emas — odam shunchaki boshqa mahallada yashaydi,
-          // mahalla xodimi uchun bu alohida ma'noli ko'rsatkich.
-          best: {
-            $max: {
-              $switch: {
-                branches: [
-                  { case: { $eq: ["$status", "added"] }, then: 4 },
-                  { case: { $eq: ["$status", "exists"] }, then: 3 },
-                  // Rad etilgan, lekin sababi "boshqa MFY da bor".
-                  {
-                    case: {
-                      $and: [
-                        { $in: ["$status", ["failed", "skipped"]] },
-                        { $eq: ["$movedAway", true] },
-                      ],
-                    },
-                    then: 2,
-                  },
-                  { case: { $in: ["$status", ["failed", "skipped"]] }, then: 1 },
-                ],
-                default: 0,
-              },
-            },
-          },
+          _id: MEMBER_KEY_EXPR,
+          best: { $max: MEMBER_BEST_EXPR },
         },
       },
       { $group: { _id: "$best", count: { $sum: 1 } } },
@@ -421,7 +451,7 @@ export const collectStats = async (run, userUid) => {
 };
 
 /** Jonli ro'yxat uchun bitta qator. */
-const describeMember = (member) => ({
+export const describeMember = (member) => ({
   id: String(member._id),
   // Platformaga LOTIN yozuvidagi ism yuboriladi; tasdiqlangani
   // bo'lsa o'shanisi aniqroq.
