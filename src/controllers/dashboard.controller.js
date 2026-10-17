@@ -104,7 +104,7 @@ export const pickVisibleRun = async (uid) => {
  * yurish bo'lgan bo'lsa o'shanisi olinadi, bo'lmasa platformadan
  * yuklangan xonadonlar kadastri bo'yicha topiladi.
  */
-const resolveMahalla = async (user) => {
+export const resolveMahalla = async (user) => {
   // 1. Oldingi yurish bo'lsa — eng ishonchli manba.
   //
   // Random yurishlar hisobga olinmaydi: ularda mahalla aniqlanmasa

@@ -11,6 +11,7 @@ import {
   getDashboardCitizen,
   getDashboardHome,
 } from "../controllers/dashboard-list.controller.js";
+import { getDashboardReport } from "../controllers/dashboard-report.controller.js";
 import { streamDashboard } from "../controllers/dashboard-stream.controller.js";
 import { getStatistics } from "../controllers/statistics.controller.js";
 import { getPlatformStats } from "../controllers/platform-stats.controller.js";
@@ -46,6 +47,7 @@ router.get("/dashboard/members/:memberId", getDashboardMember);
 router.get("/dashboard/list", getDashboardList);
 router.get("/dashboard/citizens/:citizenId", getDashboardCitizen);
 router.get("/dashboard/homes/:homeId", getDashboardHome);
+router.get("/dashboard/report", getDashboardReport);
 router.post("/dashboard/control", controlDashboard);
 router.post("/dashboard/random-start", randomStart);
  router.post("/dashboard/extra-start", extraStart);
