@@ -128,6 +128,10 @@ const registrationRunSchema = new Schema(
     randomStreetId: { type: String },
     randomSurveyUuid: { type: String },
     randomOwnerPinfl: { type: String },
+    // Yurish boshlanganda saqlangan "taqiqlangan ko'chalar" surati.
+    // Sozlama keyin o'zgarsa ham, ketayotgan yurish o'z suratiga
+    // bo'ysunadi (worker har xonadon o'tishda shu ro'yxatni o'qiydi).
+    randomExcludedStreetIds: { type: [String], default: [] },
 
     // --- Qo'shimcha a'zolar rejimi ---
     // Platformadan yuklangan (pa_survey_general) "qo'shimcha a'zolar"

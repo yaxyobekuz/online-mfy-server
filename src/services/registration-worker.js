@@ -1793,6 +1793,12 @@ const runRandomWorker = async (user, runDoc) => {
     const surveyUuid = fresh.randomSurveyUuid;
     const ownerPinfl = fresh.randomOwnerPinfl;
 
+    // Sozlamalarda taqiqlangan ko'chalar surati: keyingi xonadonga
+    // o'tishda bu ko'chalardagi xonadonlarga qo'shilmaymiz.
+    const excludedStreetIds = new Set(
+      (fresh.randomExcludedStreetIds ?? []).map((id) => String(id)),
+    );
+
     if (!homeId || !streetId || !surveyUuid) {
       throw new Error("Xonadon ma'lumotlari to'liq emas — homeId, streetId yoki surveyUuid yo'q");
     }
@@ -1954,6 +1960,9 @@ const runRandomWorker = async (user, runDoc) => {
       const streets = await fetchStreets(user, run);
 
       for (const street of streets) {
+        // Taqiqlangan ko'chani butunlay o'tkazib yuboramiz.
+        if (excludedStreetIds.has(String(street.id))) continue;
+
         const homes = await fetchStreetHomes(user, String(street.id), run);
 
         for (const home of homes) {

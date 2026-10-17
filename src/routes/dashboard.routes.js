@@ -5,6 +5,8 @@ import {
   getDashboardMember,
   randomStart,
   extraStart,
+  getStreetSettings,
+  updateStreetSettings,
 } from "../controllers/dashboard.controller.js";
 import {
   getDashboardList,
@@ -43,6 +45,8 @@ router.get("/home-members", getHomeMembers);
 
 // Aniq yo'llar :param'dan oldin turishi kerak.
 router.get("/dashboard/stream", streamDashboard);
+router.get("/dashboard/street-settings", getStreetSettings);
+router.put("/dashboard/street-settings", updateStreetSettings);
 router.get("/dashboard/members/:memberId", getDashboardMember);
 router.get("/dashboard/list", getDashboardList);
 router.get("/dashboard/citizens/:citizenId", getDashboardCitizen);

@@ -6,6 +6,7 @@ import RegistrationRun from "../models/RegistrationRun.js";
 import FamilyMember from "../models/FamilyMember.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
+import User from "../models/User.js";
 import { getRequestUser, getRequestToken } from "../utils/request-context.js";
 import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
 import { cadasterKey } from "../utils/cadaster.js";
@@ -783,6 +784,12 @@ export const randomStart = async (req, res) => {
     let surveyUuid = null;
     let ownerPinfl = null;
 
+    // Sozlamalarda taqiqlangan ko'chalar ("номаълум" kabi): random
+    // tanlovda bu ko'chalardagi xonadonlarga fuqaro qo'shilmaydi.
+    const excludedStreetIds = new Set(
+      (user.excludedStreetIds ?? []).map((id) => String(id)),
+    );
+
     if (homeId) {
       // Berilgan homeId dan formani yuklaymiz.
       const formResponse = await api.get(`/web/v1/forms/survey_homes/${homeId}`, {
@@ -813,9 +820,15 @@ export const randomStart = async (req, res) => {
       if (!streetId) {
         return res.status(400).json({ message: "Ko'cha (streetId) aniqlanmadi — xonadon topilmadi" });
       }
+
+      if (excludedStreetIds.has(String(streetId))) {
+        return res.status(400).json({
+          message: "Bu ko'chaga ma'lumot kiritish sozlamalarda taqiqlangan",
+        });
+      }
     } else {
       // Avtomatik tanlash: birinchi ko'chadan birinchi xonadon.
-      const streets = await api.get("/api/v1/survey_homes/cache/street", {
+      const allStreets = await api.get("/api/v1/survey_homes/cache/street", {
         params: {
           obl_id: user.oblId,
           area_id: user.areaId,
@@ -823,8 +836,17 @@ export const randomStart = async (req, res) => {
         },
       }).then((r) => r.data?.results ?? []);
 
+      // Taqiqlangan ko'chalarni chetlab o'tamiz.
+      const streets = allStreets.filter(
+        (street) => !excludedStreetIds.has(String(street.id)),
+      );
+
       if (!streets.length) {
-        return res.status(404).json({ message: "Ko'chalar topilmadi" });
+        return res.status(404).json({
+          message: allStreets.length
+            ? "Ruxsat etilgan ko'chalar yo'q — sozlamalarni tekshiring"
+            : "Ko'chalar topilmadi",
+        });
       }
 
       // Xonadon bor ko'chani topamiz.
@@ -941,6 +963,7 @@ export const randomStart = async (req, res) => {
       randomStreetId: streetId,
       randomSurveyUuid: surveyUuid,
       randomOwnerPinfl: ownerPinfl,
+      randomExcludedStreetIds: [...excludedStreetIds],
     });
 
     runRegistration(user, run, token);
@@ -950,6 +973,75 @@ export const randomStart = async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Server xatoligi" });
+  }
+};
+
+/**
+ * GET /api/dashboard/street-settings
+ *
+ * Random rejim sozlamalari: MFY ko'chalari ro'yxati va qaysilariga
+ * ma'lumot kiritish taqiqlangani. Ko'chalar platformadan jonli
+ * olinadi (ro'yxat o'zgarishi mumkin), taqiq esa foydalanuvchida
+ * saqlanadi.
+ *
+ * Standart holat — barcha ko'chaga ruxsat (`excludedStreetIds` bo'sh).
+ */
+export const getStreetSettings = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  try {
+    const streets = await api
+      .get("/api/v1/survey_homes/cache/street", {
+        params: {
+          obl_id: user.oblId,
+          area_id: user.areaId,
+          district_id: user.districtId,
+        },
+      })
+      .then((r) => r.data?.results ?? []);
+
+    return res.status(200).json({
+      streets: streets.map((street) => ({
+        streetId: String(street.id),
+        name: street.name,
+      })),
+      excludedStreetIds: (user.excludedStreetIds ?? []).map((id) => String(id)),
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Ko'chalarni yuklashda xatolik" });
+  }
+};
+
+/**
+ * PUT /api/dashboard/street-settings  { excludedStreetIds: string[] }
+ *
+ * Taqiqlangan ko'chalar ro'yxatini saqlaydi. Bo'sh ro'yxat —
+ * barchasiga ruxsat (standart holat).
+ */
+export const updateStreetSettings = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  const raw = req.body?.excludedStreetIds;
+  if (!Array.isArray(raw)) {
+    return res.status(400).json({ message: "excludedStreetIds ro'yxat bo'lishi kerak" });
+  }
+
+  // Noyob, satrga keltirilgan qiymatlar — takror va bo'sh qiymatlarsiz.
+  const excludedStreetIds = [
+    ...new Set(raw.map((id) => String(id).trim()).filter(Boolean)),
+  ];
+
+  try {
+    await User.updateOne({ uid: user.uid }, { $set: { excludedStreetIds } });
+
+    return res.status(200).json({
+      message: "Sozlamalar saqlandi",
+      excludedStreetIds,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Sozlamalarni saqlashda xatolik" });
   }
 };
 
