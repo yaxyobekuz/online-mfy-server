@@ -346,3 +346,36 @@ export const REASON_LABELS = {
   nomalum: "Noma'lum",
   boshqa: "Boshqa",
 };
+
+/**
+ * Qayta so'rashdan foyda yo'q sabablar — "o'zgarmas" sabablar.
+ *
+ * Bazada bir odam bir nechta kadastrda uchraydi, random rejimda esa
+ * tasodifiy tanlov o'sha odamni qayta chiqarishi mumkin. Bu
+ * sabablar bilan chetda qolgan odamni davlat bazasidan qayta
+ * so'rash bekorga vaqt va rate-limit sarflaydi — javob o'sha-o'sha
+ * keladi. Shuning uchun ular bir marta aniqlangach eslab qolinadi.
+ *
+ * Diqqat: ro'yxatga FAQAT manbadagi ma'lumotning o'zidan kelib
+ * chiqadigan sabablar kiradi. Tarmoq uzilishi yoki server xatosi
+ * (`tarmoq`, `server_xatosi`) vaqtinchalik — ular qayta urinishga
+ * arziydi, shuning uchun bu yerda yo'q.
+ */
+export const PERMANENT_REASON_CODES = [
+  // Odamning holati boshqa o'zgarmaydi.
+  "vafot_etgan",
+  // Hujjati yaroqsiz — yangi hujjat olinmaguncha javob o'zgarmaydi.
+  "hujjat_yaroqsiz",
+  // Davlat bazasidan topilmadi: manbadagi hujjat raqami xato yoki
+  // eskirgan. Excel yangilanmaguncha qayta so'rov ham topmaydi.
+  "bazada_topilmadi",
+  "pasport_topilmadi",
+  // Qidirish uchun ma'lumotning o'zi yetarli emas.
+  "qidirib_bolmaydi",
+  "hujjat_yoq",
+  // Guvohnoma bor, lekin JSHSHIR hali berilmagan.
+  "jshshir_berilmagan",
+  // Davlat bazasi qaytargan hujjat platforma talabiga mos emas —
+  // bu ma'lumotning o'zidagi nuqson.
+  "hujjat_notogri",
+];

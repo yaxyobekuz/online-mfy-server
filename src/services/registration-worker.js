@@ -60,6 +60,7 @@ import {
   yearsOld,
   reasonCodeOf,
   parseRegisteredPlace,
+  PERMANENT_REASON_CODES,
 } from "../utils/registration-codes.js";
 import { pushRunLog } from "../utils/registration-log.js";
 
@@ -853,12 +854,13 @@ const registerOneMember = async (
   if (verification.skip) {
     const skipCode = reasonCodeOf(verification.skip);
 
-    // Holati hech qachon o'zgarmaydigan sabablar: vafot etgan,
-    // hujjati yaroqsiz. Bir odam bazada bir nechta kadastrda
-    // uchraydi — uni har safar davlat bazasidan qayta so'rash
-    // bekorga rate-limit sarflaydi. Shuning uchun band deb
-    // belgilaymiz.
-    if (["vafot_etgan", "hujjat_yaroqsiz"].includes(skipCode) && citizen.pinfl) {
+    // Javobi hech qachon o'zgarmaydigan sabablar (vafot etgan,
+    // hujjati yaroqsiz, bazadan topilmadi...). Bir odam bazada bir
+    // nechta kadastrda uchraydi, random rejimda esa tasodifiy
+    // tanlov uni qayta chiqarishi mumkin — har safar davlat
+    // bazasidan qayta so'rash bekorga rate-limit sarflaydi.
+    // Shuning uchun band deb belgilaymiz.
+    if (PERMANENT_REASON_CODES.includes(skipCode) && citizen.pinfl) {
       hopelessPinfls.set(String(citizen.pinfl), verification.skip);
     }
 
@@ -1037,6 +1039,16 @@ const registerOneMember = async (
       )
     ) {
       takenPinfls.add(String(verified.pinfl));
+    }
+
+    // Rad etish sababi ma'lumotning o'zidagi nuqsondan bo'lsa
+    // (masalan hujjat raqami platforma talabiga mos emas), qayta
+    // yuborish ham xuddi shu javobni oladi. Bunday odamni band deb
+    // belgilaymiz — keyingi uchrashuvda davlat bazasiga so'rov ham
+    // ketmaydi.
+    if (PERMANENT_REASON_CODES.includes(reasonCode)) {
+      hopelessPinfls.set(String(verified.pinfl), reason);
+      if (citizen.pinfl) hopelessPinfls.set(String(citizen.pinfl), reason);
     }
 
     // Platforma "boshqa xonadonda ro'yxatda" desa, xabar ichida
@@ -1841,7 +1853,7 @@ const runRandomWorker = async (user, runDoc) => {
     for (const row of await RegistrationMember.find(
       {
         userUid: user.uid,
-        reasonCode: { $in: ["vafot_etgan", "hujjat_yaroqsiz"] },
+        reasonCode: { $in: PERMANENT_REASON_CODES },
         pinfl: { $nin: [null, ""] },
       },
       "pinfl reason",
@@ -1860,6 +1872,21 @@ const runRandomWorker = async (user, runDoc) => {
     ).lean()) {
       const key = certCacheKey(row);
       if (key) certPinfls.set(key, String(row.verifiedPinfl));
+    }
+
+    // JSHSHIR'siz o'zgarmas holatlar. Yuqoridagi `hopelessPinfls`
+    // faqat JSHSHIR bo'yicha ishlaydi — manbada JSHSHIR bo'lmasa
+    // (bazadagi yozuvlarning bir qismi shunday) u odam har yurishda
+    // qaytadan davlat bazasiga so'raladi, javob esa o'sha-o'sha.
+    // Shuning uchun bunday yozuvlarni Citizen._id bo'yicha ham
+    // eslab qolamiz.
+    const hopelessCitizenIds = new Set();
+    for (const id of await RegistrationMember.distinct("citizenId", {
+      userUid: user.uid,
+      reasonCode: { $in: PERMANENT_REASON_CODES },
+      citizenId: { $ne: null },
+    })) {
+      hopelessCitizenIds.add(String(id));
     }
 
     const totalCitizens = await Citizen.countDocuments();
@@ -2076,6 +2103,14 @@ const runRandomWorker = async (user, runDoc) => {
         continue;
       }
 
+      // JSHSHIR'i yo'q, lekin shu yozuv oldin ham o'zgarmas sabab
+      // bilan chetda qolgan — qayta so'rash bekorga ketadi.
+      if (hopelessCitizenIds.has(String(citizen._id))) {
+        consecutiveMisses += 1;
+        skipped += 1;
+        continue;
+      }
+
       // Xonadon to'lgan bo'lsa — keyingisiga o'tamiz. Aks holda
       // platforma har bir so'rovni "20 tadan ziyod" deb rad etadi
       // va rate-limit bekorga sarflanadi.
@@ -2148,10 +2183,16 @@ const runRandomWorker = async (user, runDoc) => {
         // xonadon almashadi.
         const last = await RegistrationMember.findOne(
           { runId: run._id, citizenId: citizen._id },
-          "reason",
+          "reason reasonCode",
         )
           .sort({ createdAt: -1 })
           .lean();
+
+        // Javobi o'zgarmaydigan rad etish — shu yozuvni boshqa
+        // tanlamaymiz (JSHSHIR'i yo'q bo'lsa ham ishlaydi).
+        if (PERMANENT_REASON_CODES.includes(last?.reasonCode)) {
+          hopelessCitizenIds.add(String(citizen._id));
+        }
 
         // Diqqat: limit har doim 20 emas. Platforma xonadon turiga
         // qarab boshqa son ham aytadi ("15 тадан зиёд"). Shuning
@@ -2165,6 +2206,22 @@ const runRandomWorker = async (user, runDoc) => {
       } else {
         skipped += 1;
         consecutiveMisses += 1;
+
+        // "skipped" ham o'zgarmas sabab bo'lishi mumkin (vafot
+        // etgan, bazadan topilmadi). `hopelessPinfls` ni
+        // `registerOneMember` ning o'zi to'ldiradi, lekin u faqat
+        // JSHSHIR bo'yicha. JSHSHIR'siz yozuv ham qayta
+        // tanlanmasligi uchun Citizen._id ni eslab qolamiz.
+        const lastSkip = await RegistrationMember.findOne(
+          { runId: run._id, citizenId: citizen._id },
+          "reasonCode",
+        )
+          .sort({ createdAt: -1 })
+          .lean();
+
+        if (PERMANENT_REASON_CODES.includes(lastSkip?.reasonCode)) {
+          hopelessCitizenIds.add(String(citizen._id));
+        }
       }
 
         dbFailures = 0;
@@ -2784,7 +2841,7 @@ const runWorker = async (user, runDoc) => {
     for (const row of await RegistrationMember.find(
       {
         userUid: user.uid,
-        reasonCode: { $in: ["vafot_etgan", "hujjat_yaroqsiz"] },
+        reasonCode: { $in: PERMANENT_REASON_CODES },
         pinfl: { $nin: [null, ""] },
       },
       "pinfl reason",
