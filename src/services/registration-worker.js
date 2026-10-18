@@ -1375,6 +1375,85 @@ const processHome = async (
     message: `Platformada ${existing.length} a'zo, bazada ${citizens.length} fuqaro — kiritiladi ${candidates.length} ta`,
   });
 
+  // --- Platformada avvaldan turganlarni YOZIB qo'yamiz ---
+  //
+  // Allaqachon ro'yxatda turgan odamga so'rov yuborilmaydi (yuqorida
+  // nomzodlardan chiqarib tashlandi). Avval ularga umuman yozuv
+  // yaratilmasdi — natijada ular jonli kuzatuvda ko'rinmasdi va
+  // statistikada faqat AYIRMA orqali "Platformada mavjud" bo'lib
+  // qolardi: o'lchanmaydigan, auditga yopiq son. Endi har biriga
+  // `exists` yozuvi yaratamiz — son haqiqiy kuzatuvga tayanadi,
+  // ro'yxatda nomma-nom va jonli kuzatuvda ko'rinadi.
+  //
+  // FAQAT shu xonadonda platformada haqiqatan turganlar (a'zo yoki
+  // egasi) yoziladi. Yurish davomida boshqa sabab bilan "band" bo'lib
+  // qolganlar (boshqa xonadonda qo'shilgan/rad etilgan) bu yerda
+  // yozilmaydi: ularning yakuniy yozuvi o'sha xonadonda allaqachon
+  // bor, bu yerda `exists` qo'shsak natijasini buzib yuborardik.
+  const platformPinfls = new Set();
+  for (const person of existing) {
+    if (person.pinfl) platformPinfls.add(String(person.pinfl));
+  }
+  if (homeRow.ownerPinfl) platformPinfls.add(String(homeRow.ownerPinfl));
+
+  // Shu xonadonga bu yurishda allaqachon yozilgan JSHSHIR'lar —
+  // takror yozuv yaratmaslik uchun (xonadon qayta ishlangan bo'lishi
+  // mumkin, `alreadyTried` yuqorida added/exists yozuvlaridan to'ldi).
+  const recordedPinfls = new Set();
+  for (const attempt of alreadyTried) {
+    for (const p of [attempt.pinfl, attempt.verifiedPinfl]) {
+      if (p) recordedPinfls.add(String(p));
+    }
+  }
+
+  const existsRows = [];
+  for (const citizen of citizens) {
+    if (!citizen.pinfl) continue;
+    const key = String(citizen.pinfl);
+    if (!platformPinfls.has(key) || recordedPinfls.has(key)) continue;
+    // Shu yurishda bir odam bir necha bor chiqmasin.
+    recordedPinfls.add(key);
+
+    existsRows.push({
+      runId: run._id,
+      homeRowId: homeRow._id,
+      cadasterNumber: homeRow.cadasterNumber,
+      homeId: homeRow.homeId,
+      citizenId: citizen._id,
+      fullName: citizen.fullName,
+      birthDate: citizen.birthDate,
+      document: citizen.document,
+      pinfl: key,
+      status: "exists",
+      reason: "Platformada allaqachon ro'yxatda (shu xonadonda)",
+      reasonCode: "allaqachon_mavjud",
+      durationMs: 0,
+      attemptedAt: new Date(),
+      userUid: user.uid,
+    });
+  }
+
+  if (existsRows.length) {
+    // ordered:false — bitta takror (noyob indeks) butun partiyani
+    // to'xtatib qo'ymasin.
+    await RegistrationMember.insertMany(existsRows, { ordered: false }).catch(
+      (err) => {
+        pushRunLog(run._id, {
+          level: "warn",
+          message: `Avvaldan turganlarni yozishda xatolik: ${err.message}`,
+        });
+      },
+    );
+
+    for (const row of existsRows) {
+      pushRunLog(run._id, {
+        level: "skip",
+        fullName: row.fullName,
+        message: "Platformada allaqachon ro'yxatda",
+      });
+    }
+  }
+
   if (!candidates.length) {
     await finishHome({
       status: "skipped",
