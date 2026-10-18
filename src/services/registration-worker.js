@@ -124,18 +124,43 @@ class TokenExpiredError extends Error {
  * yana shuncha. Aks holda allaqachon 1255 odam kiritilgan yurishda
  * 50 lik chegara darhol ishga tushib, hech narsa qilinmasdi.
  */
-const newSession = async (userUid) => {
+const readLimit = async (userUid) => {
   const settings = await User.findOne({ uid: userUid })
     .select("autoStopAfter")
     .lean()
     .catch(() => null);
 
-  const limit = Number(settings?.autoStopAfter) || 0;
-  return { added: 0, limit };
+  return Number(settings?.autoStopAfter) || 0;
 };
 
-const reachedLimit = (session) =>
-  Boolean(session) && session.limit > 0 && session.added >= session.limit;
+const newSession = async (userUid) => ({
+  userUid,
+  added: 0,
+  limit: await readLimit(userUid),
+  readAt: Date.now(),
+});
+
+// Chegara jarayon KETAYOTGANDA ham o'zgartirilishi mumkin: xodim
+// sozlamani ochib, raqam yozib, saqlaydi. Boshida bir marta o'qisak,
+// u o'zgarish faqat KEYINGI "Boshlash" da ishga tushardi — xodim esa
+// chegara umuman ishlamayapti deb o'ylardi. Shuning uchun qiymat
+// boshqaruv tugmasi kabi vaqti-vaqti bilan qayta o'qiladi.
+const LIMIT_CACHE_MS = 10000;
+
+const refreshLimit = async (session) => {
+  if (!session) return;
+  if (Date.now() - session.readAt < LIMIT_CACHE_MS) return;
+
+  session.limit = await readLimit(session.userUid);
+  session.readAt = Date.now();
+};
+
+const reachedLimit = async (session) => {
+  if (!session) return false;
+
+  await refreshLimit(session);
+  return session.limit > 0 && session.added >= session.limit;
+};
 
 // Chegara tufayli to'xtatilgan yurish — bu xato emas, rejalashtirilgan
 // to'xtash. Foydalanuvchi "Boshlash" bilan davom ettiradi.
@@ -1564,7 +1589,7 @@ const processHome = async (
     // To'xtash "To'xtatish" tugmasi bilan bir xil yo'ldan ketadi:
     // xonadon `pending` ga qaytadi va davom ettirilganda qolgan
     // odamlar qayta ishlanadi.
-    if (reachedLimit(session)) {
+    if (await reachedLimit(session)) {
       interrupted = "limit";
       break;
     }
@@ -2957,7 +2982,7 @@ const runExtraWorker = async (user, runDoc) => {
 
         // Sozlamadagi chegara bu rejimga ham tegishli — u ham
         // platformaga odam qo'shadi.
-        if (reachedLimit(session)) {
+        if (await reachedLimit(session)) {
           interrupted = true;
           hitLimit = true;
           break;
