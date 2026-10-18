@@ -96,6 +96,49 @@ const NETWORK_ERRORS = new Set([
 const isNetworkError = (err) =>
   !err?.response && (NETWORK_ERRORS.has(err?.code) || err?.code === "ERR_NETWORK");
 
+// Platforma tokeni yaroqsiz yoki muddati o'tgan — HTTP 401. Bu bitta
+// fuqaroning emas, BUTUN yurishning muammosi: token eskirgach qolgan
+// barcha so'rovlar ham 401 beradi. Shuning uchun uni alohida ushlab,
+// yurishni "pauza" qilamiz (har bir fuqaroni "xato" deb belgilash
+// o'rniga) — foydalanuvchi tokenni yangilab, davom ettiradi.
+const isAuthError = (err) => err?.response?.status === 401;
+
+class TokenExpiredError extends Error {
+  constructor(message = "Platforma tokeni eskirgan — yangilang va davom eting") {
+    super(message);
+    this.name = "TokenExpiredError";
+  }
+}
+
+// Token eskirsa yurishni "pauza" holatiga o'tkazadi (xato emas): panel
+// uni "To'xtatib turildi" ko'rinishida ko'rsatadi, foydalanuvchi tokenni
+// yangilab, "Davom ettirish" bosadi. Shu bilan token eskirgan paytdagi
+// minglab fuqaro bekorga "xato" bo'lib qolmaydi.
+const pauseRunForExpiredToken = async (run) => {
+  await RegistrationRun.updateOne(
+    { _id: run._id },
+    {
+      $set: {
+        status: "paused",
+        stage: "Token eskirgan — yangilang va davom eting",
+        waitingUntil: null,
+      },
+    },
+  );
+  pushRunLog(run._id, {
+    level: "error",
+    message:
+      "Platforma tokeni eskirgan. Qolgan fuqarolar xato deb belgilanmadi — " +
+      "tokenni yangilab, jarayonni davom ettiring.",
+  });
+};
+
+// FHDYO/platforma "topilmadi" yoki hujjat formati noto'g'ri bo'lganda
+// HTTP 400 (exception) qaytaradi — GCP kabi 200+code emas. Bu tizim
+// xatosi EMAS, fuqaro ma'lumotidagi muammo, shuning uchun "xato" emas,
+// "o'tkazildi" (skip) deb belgilanishi kerak.
+const isDataRejection = (err) => err?.response?.status === 400;
+
 // GCP ba'zan haqiqiy sababni bermasdan "Internal Server Error"
 // qaytaradi — bu vaqtinchalik nosozlik, qayta so'rashda ko'pincha
 // hal bo'ladi (yo ma'lumot keladi, yo aniq sabab chiqadi).
@@ -491,7 +534,23 @@ const verifyCitizen = async (citizen, run) => {
       };
     } else {
       // Tug'ilganlik guvohnomasi — FHDYO bazasidan.
-      const response = await fetchBirthCert(series, number, isoBirthDate, run);
+      let response;
+      try {
+        response = await fetchBirthCert(series, number, isoBirthDate, run);
+      } catch (err) {
+        // FHDYO guvohnomani topa olmaganda yoki raqam/seriya formati
+        // noto'g'ri bo'lganda HTTP 400 (exception) qaytaradi — GCP kabi
+        // 200+xabar emas. Shu sababli bu "topilmadi" hech qachon yumshoq
+        // skip yo'liga yetib bormay, har bir bola "xato" bo'lib qolardi.
+        // 400 ni fuqaro ma'lumotidagi kamchilik deb, "o'tkazildi" qilamiz.
+        // 401 (token) va 429 (rate-limit) bu yerga kelmaydi: ular
+        // yuqorida boshqariladi.
+        if (isDataRejection(err)) {
+          const reason = describeError(err) || "Guvohnoma bo'yicha ma'lumot topilmadi";
+          return { skip: reason, registryResponse: err.response?.data ?? null };
+        }
+        throw err;
+      }
       const person = extractBirthCertPerson(response);
 
       if (!person) {
@@ -796,6 +855,16 @@ const registerOneMember = async (
   try {
     verification = await verifyCitizen(citizen, run);
   } catch (err) {
+    // Token eskirgan (401) — bu fuqaroning emas, butun yurishning
+    // muammosi. Uni "xato" deb belgilamay, yuqoriga uzatamiz: yurish
+    // pauza qilinadi. Yarim qolgan "pending" yozuvni o'chiramiz, aks
+    // holda u statistikada osilib qoladi (davom ettirilganda qayta
+    // yaratiladi).
+    if (isAuthError(err)) {
+      await RegistrationMember.deleteOne({ _id: member._id });
+      throw new TokenExpiredError();
+    }
+
     // Tarmoq uzilishi — odamning aybi yo'q. Kutib, bir marta qayta
     // urinamiz, aks holda uzilish paytidagi o'nlab odam bekorga
     // "xato" bo'lib qolardi.
@@ -818,6 +887,11 @@ const registerOneMember = async (
       try {
         verification = await verifyCitizen(citizen, run);
       } catch (retryErr) {
+        if (isAuthError(retryErr)) {
+          await RegistrationMember.deleteOne({ _id: member._id });
+          throw new TokenExpiredError();
+        }
+
         const reason = describeError(retryErr);
         await finish({
           status: "failed",
@@ -2278,6 +2352,12 @@ const runRandomWorker = async (user, runDoc) => {
       message: `Random rejim tugadi — ${added}/${target} muvaffaqiyatli, ${failed} xato, ${skipped} o'tkazildi (${attempted} urinish)`,
     });
   } catch (err) {
+    // Token eskirgan — xato emas, pauza (yangilab davom ettiriladi).
+    if (err instanceof TokenExpiredError) {
+      await pauseRunForExpiredToken(run);
+      return;
+    }
+
     console.error("[Random ro'yxatga olish] xatolik:", err);
 
     await RegistrationRun.updateOne(
@@ -2715,6 +2795,12 @@ const runExtraWorker = async (user, runDoc) => {
       },
     );
   } catch (err) {
+    // Token eskirgan — xato emas, pauza (yangilab davom ettiriladi).
+    if (err instanceof TokenExpiredError) {
+      await pauseRunForExpiredToken(run);
+      return;
+    }
+
     console.error("[Qo'shimcha a'zolar] xatolik:", err);
     await RegistrationRun.updateOne(
       { _id: run._id },
@@ -2957,6 +3043,12 @@ const runWorker = async (user, runDoc) => {
       `[Ro'yxatga olish] "${run.mahallaName}" tugadi: ${final?.membersAdded ?? 0} qo'shildi`,
     );
   } catch (err) {
+    // Token eskirgan — xato emas, pauza (yangilab davom ettiriladi).
+    if (err instanceof TokenExpiredError) {
+      await pauseRunForExpiredToken(run);
+      return;
+    }
+
     console.error("[Ro'yxatga olish] jarayon to'xtadi:", err);
 
     await RegistrationRun.updateOne(

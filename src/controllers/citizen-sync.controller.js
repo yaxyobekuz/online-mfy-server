@@ -354,6 +354,16 @@ const syncCitizens = async (user, citizens) => {
           `[Fuqarolar sync] ${position}/${total} — OK${viaBirthCert ? " guvohnoma→pasport" : ""} (${citizen.fullName ?? pinfl}) ${Date.now() - startedAt}ms`,
         );
       } catch (err) {
+        // Token eskirgan (401) — bu yozuvning emas, butun jarayonning
+        // muammosi: token eskirgach qolgan HAMMA yozuv ham 401 beradi va
+        // bekorga "xato" bo'lib qolardi. Shuning uchun zanjirni uzamiz:
+        // yuqoriga uzatamiz, jarayon "token eskirgan" deb to'xtaydi.
+        if (err.response?.status === 401) {
+          throw new Error(
+            "Platforma tokeni eskirgan — yangilang va qaytadan boshlang",
+          );
+        }
+
         // Tarmoq uzilgan bo'lsa — yozuvning aybi yo'q, aloqa
         // tiklanishini kutamiz. Uzilish bir necha soniya davom etsa,
         // aks holda o'nlab yozuv bekorga "xato" bo'lib qolardi.
