@@ -26,6 +26,18 @@ const userSchema = new Schema(
     // taqiqlanib qolardi — istisno ro'yxati esa yangi ko'chani
     // avtomatik ruxsat etadi.
     excludedStreetIds: { type: [String], default: [] },
+
+    // Bitta yurishda eng ko'pi bilan nechta odam KIRITILSIN.
+    //
+    // 0 — cheklov yo'q (standart holat). Musbat son berilsa, shuncha
+    // odam muvaffaqiyatli qo'shilgach yurish o'zi to'xtaydi.
+    //
+    // Nega kerak: "Boshlash" bosilgach jarayon oxirigacha ketaverardi
+    // va kerakdan ortiq odam kiritilib qolardi. Hisob HAR BIR YURISH
+    // uchun alohida ketadi (yurish umri bo'yicha emas): tugmani
+    // bosganda shuncha kiritiladi va to'xtaydi, keyin yana bossa —
+    // yana shuncha.
+    autoStopAfter: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

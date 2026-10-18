@@ -36,6 +36,7 @@ import RegistrationRun from "../models/RegistrationRun.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import MfyToken from "../models/MfyToken.js";
+import User from "../models/User.js";
 import { withRateLimit } from "../utils/rate-limit.js";
 import { requestContext } from "../utils/request-context.js";
 import {
@@ -115,6 +116,55 @@ class TokenExpiredError extends Error {
 // uni "To'xtatib turildi" ko'rinishida ko'rsatadi, foydalanuvchi tokenni
 // yangilab, "Davom ettirish" bosadi. Shu bilan token eskirgan paytdagi
 // minglab fuqaro bekorga "xato" bo'lib qolmaydi.
+/**
+ * Bitta "Boshlash" davomida nechta odam kiritilgani va chegara.
+ *
+ * Hisob yurish umri bo'yicha EMAS, shu sessiya bo'yicha ketadi:
+ * tugma bosilganda chegaracha kiritiladi va to'xtaydi, yana bosilsa
+ * yana shuncha. Aks holda allaqachon 1255 odam kiritilgan yurishda
+ * 50 lik chegara darhol ishga tushib, hech narsa qilinmasdi.
+ */
+const newSession = async (userUid) => {
+  const settings = await User.findOne({ uid: userUid })
+    .select("autoStopAfter")
+    .lean()
+    .catch(() => null);
+
+  const limit = Number(settings?.autoStopAfter) || 0;
+  return { added: 0, limit };
+};
+
+const reachedLimit = (session) =>
+  Boolean(session) && session.limit > 0 && session.added >= session.limit;
+
+// Chegara tufayli to'xtatilgan yurish — bu xato emas, rejalashtirilgan
+// to'xtash. Foydalanuvchi "Boshlash" bilan davom ettiradi.
+const stopRunAtLimit = async (run, session) => {
+  await RegistrationRun.updateOne(
+    { _id: run._id },
+    {
+      $set: {
+        status: "stopped",
+        control: "stop",
+        stage: `Chegaraga yetildi — ${session.added} ta kiritildi`,
+        waitingUntil: null,
+        finishedAt: new Date(),
+      },
+    },
+  );
+
+  pushRunLog(run._id, {
+    level: "info",
+    message:
+      `Sozlamadagi chegara (${session.limit} ta) bajarildi — jarayon ` +
+      `avtomatik to'xtatildi. Davom ettirish uchun "Boshlash" bosing.`,
+  });
+
+  console.log(
+    `[Ro'yxatga olish] "${run.mahallaName}" chegaraga yetdi: ${session.added}/${session.limit}`,
+  );
+};
+
 const pauseRunForExpiredToken = async (run) => {
   await RegistrationRun.updateOne(
     { _id: run._id },
@@ -1191,6 +1241,7 @@ const processHome = async (
   takenPinfls,
   hopelessPinfls,
   certPinfls,
+  session = null,
 ) => {
   const startedAt = Date.now();
 
@@ -1507,6 +1558,17 @@ const processHome = async (
       break;
     }
 
+    // Sozlamadagi chegaraga yetdikmi? Tekshiruv aynan SHU YERDA —
+    // odamlar oralig'ida — turibdi: xonadon tugashini kutsak, chegara
+    // oshib ketardi (bitta xonadonda 20 tagacha odam bo'lishi mumkin).
+    // To'xtash "To'xtatish" tugmasi bilan bir xil yo'ldan ketadi:
+    // xonadon `pending` ga qaytadi va davom ettirilganda qolgan
+    // odamlar qayta ishlanadi.
+    if (reachedLimit(session)) {
+      interrupted = "limit";
+      break;
+    }
+
     const result = await registerOneMember(
       user,
       run,
@@ -1518,8 +1580,13 @@ const processHome = async (
       certPinfls,
     );
 
-    if (result === "added") added += 1;
-    else if (result === "failed") failed += 1;
+    if (result === "added") {
+      added += 1;
+      // Chegara FAQAT muvaffaqiyatli kiritishlarni sanaydi: rad
+      // etilganlar platformaga hech narsa qo'shmaydi, ularni sanash
+      // chegarani bekorga yeb qo'yardi.
+      if (session) session.added += 1;
+    } else if (result === "failed") failed += 1;
     else skipped += 1;
 
     // Har odamdan keyin hisoblagich yangilanadi — client jonli
@@ -1962,8 +2029,23 @@ const runRandomWorker = async (user, runDoc) => {
       .select("+token")
       .lean();
 
-    const target = fresh.randomTarget ?? 0;
-    if (target <= 0) throw new Error("Maqsad soni noto'g'ri");
+    const asked = fresh.randomTarget ?? 0;
+    if (asked <= 0) throw new Error("Maqsad soni noto'g'ri");
+
+    // Sozlamadagi chegara random rejimga ham tegishli: modalda
+    // so'ralgan maqsad bilan solishtirib, KICHIGI olinadi. Aks holda
+    // "100 ta" deb yozilgan chegara random orqali bemalol oshib
+    // ketardi.
+    const session = await newSession(user.uid);
+    const target =
+      session.limit > 0 ? Math.min(asked, session.limit) : asked;
+
+    if (target < asked) {
+      pushRunLog(run._id, {
+        level: "info",
+        message: `Sozlamadagi chegara (${session.limit} ta) tufayli maqsad ${asked} dan ${target} ga tushirildi`,
+      });
+    }
 
     const homeId = fresh.randomHomeId;
     const streetId = fresh.randomStreetId;
@@ -2794,6 +2876,9 @@ const runExtraWorker = async (user, runDoc) => {
   const runId = String(runDoc._id);
   const run = runDoc;
 
+  // Sozlamadagi avtomatik to'xtash chegarasi (har "Boshlash" da noldan).
+  const session = await newSession(user.uid);
+
   try {
     const queued = await RegistrationHome.countDocuments({ runId: run._id });
     if (!queued) {
@@ -2862,14 +2947,27 @@ const runExtraWorker = async (user, runDoc) => {
 
       let added = 0;
       let interrupted = false;
+      let hitLimit = false;
 
       for (const member of members) {
         if ((await readControlCached(run)) !== "run") {
           interrupted = true;
           break;
         }
+
+        // Sozlamadagi chegara bu rejimga ham tegishli — u ham
+        // platformaga odam qo'shadi.
+        if (reachedLimit(session)) {
+          interrupted = true;
+          hitLimit = true;
+          break;
+        }
+
         const r = await postExtraMember(user, run, homeRow, member);
-        if (r === "added") added += 1;
+        if (r === "added") {
+          added += 1;
+          session.added += 1;
+        }
         await recountRun(run._id);
       }
 
@@ -2878,6 +2976,12 @@ const runExtraWorker = async (user, runDoc) => {
           { _id: homeRow._id },
           { $set: { status: "pending" } },
         );
+
+        if (hitLimit) {
+          await stopRunAtLimit(run, session);
+          return;
+        }
+
         continue;
       }
 
@@ -3031,6 +3135,10 @@ const runWorker = async (user, runDoc) => {
     // ma'lum bo'ladi. Bir marta bilib olingach, qayta so'ramaymiz.
     const certPinfls = new Map();
 
+    // Sozlamadagi avtomatik to'xtash chegarasi. Har "Boshlash" da
+    // noldan sanaladi.
+    const session = await newSession(user.uid);
+
     for (const row of await RegistrationMember.find(
       {
         userUid: user.uid,
@@ -3116,6 +3224,7 @@ const runWorker = async (user, runDoc) => {
         takenPinfls,
         hopelessPinfls,
         certPinfls,
+        session,
       );
 
       // Hisoblagichlarni $inc bilan emas, HAQIQIY yozuvlardan qayta
@@ -3123,6 +3232,16 @@ const runWorker = async (user, runDoc) => {
       // o'chib qolgan bo'lsa), $inc esa bunda ikki marta qo'shib
       // yuborardi va sonlar haqiqatdan uzoqlashardi.
       await recountRun(run._id);
+
+      // Sozlamadagi chegara bajarildi — yurishni YAKUNLAYMIZ.
+      //
+      // Bu `continue` bilan bo'lmaydi: boshqaruv hamon "run" bo'lgani
+      // uchun sikl o'sha xonadonni qayta-qayta olib, abadiy
+      // aylanaverardi.
+      if (homeResult?.interrupted === "limit") {
+        await stopRunAtLimit(run, session);
+        return;
+      }
 
       // Xonadon o'rtasida to'xtatilgan bo'lsa — siklni uzamiz.
       // Keyingi aylanishdagi boshqaruv tekshiruvi holatni (paused/

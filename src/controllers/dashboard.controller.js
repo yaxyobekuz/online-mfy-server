@@ -1086,6 +1086,7 @@ export const getStreetSettings = async (req, res) => {
         name: street.name,
       })),
       excludedStreetIds: (user.excludedStreetIds ?? []).map((id) => String(id)),
+      autoStopAfter: user.autoStopAfter ?? 0,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Ko'chalarni yuklashda xatolik" });
@@ -1112,12 +1113,31 @@ export const updateStreetSettings = async (req, res) => {
     ...new Set(raw.map((id) => String(id).trim()).filter(Boolean)),
   ];
 
+  // Avtomatik to'xtash chegarasi. 0 yoki berilmagan — cheklov yo'q.
+  // Manfiy yoki kasr son chegara sifatida ma'nosiz, shuning uchun
+  // butun songa keltirilib tekshiriladi.
+  const limitRaw = req.body?.autoStopAfter;
+  const autoStopAfter =
+    limitRaw === undefined || limitRaw === null || limitRaw === ""
+      ? 0
+      : Number(limitRaw);
+
+  if (!Number.isInteger(autoStopAfter) || autoStopAfter < 0) {
+    return res.status(400).json({
+      message: "To'xtatish chegarasi 0 yoki musbat butun son bo'lishi kerak",
+    });
+  }
+
   try {
-    await User.updateOne({ uid: user.uid }, { $set: { excludedStreetIds } });
+    await User.updateOne(
+      { uid: user.uid },
+      { $set: { excludedStreetIds, autoStopAfter } },
+    );
 
     return res.status(200).json({
       message: "Sozlamalar saqlandi",
       excludedStreetIds,
+      autoStopAfter,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Sozlamalarni saqlashda xatolik" });
