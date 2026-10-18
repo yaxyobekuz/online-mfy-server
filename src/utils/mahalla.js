@@ -91,12 +91,35 @@ const AREA_PREFIX =
 /**
  * Manzil matnidan mahalla nomini ajratadi. Topilmasa null.
  */
+// Ko'cha/uy belgilari — matn to'liq MANZIL ekanini bildiradi, ya'ni
+// undagi nom mahalla emas.
+const STREET_MARKER =
+  /(?:^|[\s,.])(KO[`'’]?CHASI|KUCHASI|КЎЧАСИ|КУЧАСИ|STREET|UY|ХОНАДОН|XONADON|Д\.|UY:|uy:)/i;
+
 export const extractMahallaName = (address) => {
   const text = String(address ?? "").trim();
   if (!text) return null;
 
   const marker = text.match(MAHALLA_MARKER);
-  if (!marker) return null;
+
+  // Belgi yo'q bo'lsa ham taslim bo'lmaymiz: Excel'dagi "MFY" ustuni
+  // ko'pincha faqat NOMNING o'zini saqlaydi ("Dalvarzin", "Ўрта") —
+  // "MFY" qo'shimchasisiz. Avval bunday qiymat null qaytarardi va
+  // natijada "Boshlash" butunlay ishlamasdi: mahalla aniqlanmagani
+  // uchun panel "Mahalla hali hisoblanmagan" deb turardi, garchi
+  // xonadonlar ham, fuqarolar ham joyida bo'lsa.
+  //
+  // Faqat QISQA va sodda qiymat qabul qilinadi: vergulli yoki
+  // ko'cha/uy belgisi bor matn — bu to'liq manzil, undan nom
+  // taxmin qilish xato bo'lardi.
+  if (!marker) {
+    if (text.includes(",") || STREET_MARKER.test(text)) return null;
+
+    const plain = text.replace(/\s+/g, " ").trim();
+    if (plain.split(" ").length > 3) return null;
+
+    return plain || null;
+  }
 
   // Marker boshigacha bo'lgan qism (oldidagi ajratuvchini qo'shmasdan)
   let name = text.slice(0, marker.index + (marker[0].length - marker[1].length));

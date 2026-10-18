@@ -295,8 +295,14 @@ export const parseRegisteredPlace = (reason) => {
   if (!text) return null;
 
   // "<Viloyat> вилояти, <Tuman> тумани, <Mahalla> маҳалласи"
+  //
+  // O'rta bo'lak tuman ham, SHAHAR ham bo'lishi mumkin:
+  // "Андижон вилояти, Андижон шаҳри, Қоратут маҳалласи". Avval
+  // faqat "тумани" tan olinardi va shahar manzillari umuman
+  // ajratilmasdi — natijada boshqa shaharda ro'yxatda turgan odam
+  // "ko'chib ketgan" emas, oddiy XATO bo'lib sanalardi.
   const match = text.match(
-    /([^,]+?)\s*вилояти\s*,\s*([^,]+?)\s*тумани\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
+    /([^,]+?)\s*вилояти\s*,\s*([^,]+?)\s*(?:тумани|ша[ҳх]ри)\s*,\s*([^,]+?)\s*ма[ҳх]алласи/i,
   );
 
   if (!match) return null;
