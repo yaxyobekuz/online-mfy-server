@@ -681,7 +681,25 @@ export const controlDashboard = async (req, res) => {
         // ularni qaytarish rate-limit ni bekorga sarflardi.
         let requeued = 0;
 
-        if (resumable.status === "done") {
+        // Shart yurish holati emas, NAVBAT: ishchi faqat
+        // `pending`/`processing` xonadonni oladi. Navbatda shunday
+        // yozuv bo'lsa, oddiy davom ettirish kifoya. Bo'lmasa,
+        // ishchi darhol chiqib ketardi — demak avval biror narsani
+        // navbatga qaytarishimiz kerak.
+        //
+        // Avval bu yerda `status === "done"` tekshirilardi va
+        // "to'xtatilgan" yurish navbati bo'sh bo'lsa-da davom
+        // ettirilaverardi (natijada hech narsa bo'lmasdi).
+        const queued = await RegistrationHome.countDocuments({
+          runId: resumable._id,
+          status: { $in: ["pending", "processing"] },
+        });
+
+        if (!queued) {
+          // 1. A'ZO darajasidagi VAQTINCHALIK xatolar: tashqi server
+          //    va tarmoq. Qolganlari (vafot etgan, boshqa xonadon
+          //    egasi, hujjat nuqsoni) qayta urinishdan o'zgarmaydi —
+          //    ularni qaytarish rate-limit ni bekorga sarflardi.
           const retryable = await RegistrationMember.distinct("homeRowId", {
             runId: resumable._id,
             reasonCode: { $in: ["server_xatosi", "tarmoq"] },
@@ -692,7 +710,34 @@ export const controlDashboard = async (req, res) => {
               { _id: { $in: retryable }, runId: resumable._id },
               { $set: { status: "pending" } },
             );
-            requeued = result.modifiedCount;
+            requeued += result.modifiedCount;
+          }
+
+          // 2. XONADON darajasida yiqilganlar: token eskirgan, API
+          //    xatosi — a'zolarga umuman yetib borilmagan. Ularda
+          //    a'zo yozuvi YO'Q, shuning uchun yuqoridagi qidiruv
+          //    ularni ko'rmasdi. Panel esa ichidagi odamlarni
+          //    "kutilmoqda" deb sanaydi (`isHomeFinished`) — natijada
+          //    kartochka "61 ta" deb tursa-yu, tugma "qayta
+          //    urinadigan yozuv qolmadi" derdi.
+          const broken = await RegistrationHome.find(
+            { runId: resumable._id, status: "failed" },
+            "candidatesCount existingCount addedCount failedCount skippedCount status",
+          ).lean();
+
+          const neverWorked = broken
+            .filter((home) => !isHomeFinished(home))
+            .map((home) => home._id);
+
+          if (neverWorked.length) {
+            const result = await RegistrationHome.updateMany(
+              { _id: { $in: neverWorked } },
+              {
+                $set: { status: "pending" },
+                $unset: { reason: "", finishedAt: "", durationMs: "" },
+              },
+            );
+            requeued += result.modifiedCount;
           }
 
           if (!requeued) {
