@@ -5,7 +5,7 @@ import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser } from "../utils/request-context.js";
 import {
   describeMember,
-  FINISHED_HOME_STATUSES,
+  isHomeFinished,
   MEMBER_BEST_EXPR,
   MEMBER_KEY_EXPR,
   memberScopeMatch,
@@ -124,12 +124,9 @@ const buildRows = async (kind, run, userUid) => {
     const chosen = new Map();
     for (const home of homes) {
       const current = chosen.get(home.cadasterNumber);
-      const isFinished = FINISHED_HOME_STATUSES.includes(home.status);
+      const isFinished = isHomeFinished(home);
 
-      if (
-        !current ||
-        (isFinished && !FINISHED_HOME_STATUSES.includes(current.status))
-      ) {
+      if (!current || (isFinished && !isHomeFinished(current))) {
         chosen.set(home.cadasterNumber, home);
       }
     }

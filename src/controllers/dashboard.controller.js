@@ -43,6 +43,37 @@ const FEED_LIMIT = 40;
 // odam ko'rib chiqilgan.
 export const FINISHED_HOME_STATUSES = ["done", "partial", "skipped", "failed"];
 
+/**
+ * Xonadon HAQIQATAN ishlab bo'lindimi?
+ *
+ * "failed" ikki xil narsani bildiradi:
+ *   1. a'zolar ko'rib chiqilgan, lekin hech kim kirmagan
+ *      ("Hech kim kiritilmadi — 2 ta a'zo rad etildi") — bu tugagan;
+ *   2. xonadonning O'ZI o'qilmagan (token eskirgan, survey_uuid
+ *      yo'q, API xatosi) — a'zolarga umuman yetib borilmagan.
+ *
+ * Ikkinchisini "tugagan" deb sanash jiddiy xatoga olib kelardi:
+ * undagi odamlar `pending` dan chiqib ketib, `exists` (qoldiq)
+ * ustuniga tushardi — ya'ni panel ularni "platformada allaqachon
+ * bor" deb ko'rsatardi, aslida ular hech qachon urinilmagan.
+ *
+ * Farqi: ishlangan xonadonda sanoqlardan biri noldan katta bo'ladi
+ * (nomzod topilgan, platformada a'zo bor, yoki urinish bo'lgan).
+ */
+export const isHomeFinished = (home) => {
+  if (!FINISHED_HOME_STATUSES.includes(home.status)) return false;
+  if (home.status !== "failed") return true;
+
+  const touched =
+    (home.candidatesCount ?? 0) +
+    (home.existingCount ?? 0) +
+    (home.addedCount ?? 0) +
+    (home.failedCount ?? 0) +
+    (home.skippedCount ?? 0);
+
+  return touched > 0;
+};
+
 const requireUser = (res) => {
   const user = getRequestUser();
   if (!user) {
@@ -283,7 +314,7 @@ export const resolveScope = async (run, userUid) => {
   // har kadastrdan BITTA — eng yaxshi — holat olinadi.
   const homeRows = await RegistrationHome.find(
     { runId: { $in: runIds } },
-    "cadasterNumber status",
+    "cadasterNumber status candidatesCount existingCount addedCount failedCount skippedCount",
   ).lean();
 
   const bestStatus = new Map();
@@ -292,10 +323,13 @@ export const resolveScope = async (run, userUid) => {
     if (!row.cadasterNumber) continue;
 
     const current = bestStatus.get(row.cadasterNumber);
-    const isFinished = FINISHED_HOME_STATUSES.includes(row.status);
+    const isFinished = isHomeFinished(row);
 
     if (!current || (isFinished && !FINISHED_HOME_STATUSES.includes(current))) {
-      bestStatus.set(row.cadasterNumber, row.status);
+      // "failed" bo'lsa-yu a'zo bosqichiga yetmagan bo'lsa, uni
+      // tugagan deb yozmaymiz — `pending` qoldiramiz, shunda undagi
+      // odamlar "kutilmoqda" da ko'rinadi va qayta urinilaadi.
+      bestStatus.set(row.cadasterNumber, isFinished ? row.status : "pending");
     }
   }
 

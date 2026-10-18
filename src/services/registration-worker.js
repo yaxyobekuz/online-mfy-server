@@ -35,6 +35,7 @@ import FamilyMember from "../models/FamilyMember.js";
 import RegistrationRun from "../models/RegistrationRun.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
+import MfyToken from "../models/MfyToken.js";
 import { withRateLimit } from "../utils/rate-limit.js";
 import { requestContext } from "../utils/request-context.js";
 import {
@@ -125,6 +126,17 @@ const pauseRunForExpiredToken = async (run) => {
       },
     },
   );
+
+  // Tokenni shu yerda ham belgilab qo'yamiz: aynan shu nuqtada uning
+  // o'lgani ANIQ. Interceptorga tayanib qolmaymiz — u faqat so'rov
+  // konteksti to'g'ri bo'lsa ishlaydi, bu esa panel xodimga token
+  // yangilash kerakligini ko'rsatadigan yagona belgi.
+  if (run.userUid) {
+    await MfyToken.updateOne(
+      { uid: run.userUid },
+      { $set: { status: "expired", lastCheckedAt: new Date() } },
+    ).catch(() => {});
+  }
   pushRunLog(run._id, {
     level: "error",
     message:
@@ -1264,6 +1276,15 @@ const processHome = async (
         },
       );
     } catch (err) {
+      // Token eskirgan (401) — bu XONADONNING emas, butun yurishning
+      // muammosi. Uni "xato" deb belgilasak, xonadon abadiy
+      // o'tkazib yuborilardi (navbat faqat pending/processing ni
+      // oladi) va undagi odamlar hech qachon urinilmasdan
+      // "platformada bor" bo'lib ko'rinardi. Shuning uchun yuqoriga
+      // uzatamiz: yurish pauza qilinadi, xonadon `processing` da
+      // qoladi va token yangilangach qaytadan ishlanadi.
+      if (isAuthError(err)) throw new TokenExpiredError();
+
       const reason = describeError(err);
       await finishHome({ status: "failed", reason });
 
@@ -1297,6 +1318,9 @@ const processHome = async (
       run,
     );
   } catch (err) {
+    // Yuqoridagi bilan bir xil sabab: 401 xonadonning aybi emas.
+    if (isAuthError(err)) throw new TokenExpiredError();
+
     const reason = describeError(err);
     await finishHome({ status: "failed", reason });
 
@@ -2527,7 +2551,14 @@ export const runRegistration = async (user, runDoc, token) => {
     : runDoc.randomMode
       ? runRandomWorker
       : runWorker;
-  return requestContext.run({ token, user }, () => worker(user, runDoc));
+  // `mahallaUid` ham qo'yiladi: `api.js` dagi javob interceptori 401
+  // kelganda tokenni "eskirgan" deb AYNAN shu uid bo'yicha belgilaydi.
+  // Usiz fon ishchisining 401 lari hech qayerga yozilmasdi — panel
+  // tokenni yashil ("active") ko'rsatib turardi, xodim esa token
+  // o'lganini bilmay, yurish behuda aylanaverardi.
+  return requestContext.run({ token, user, mahallaUid: user.uid }, () =>
+    worker(user, runDoc),
+  );
 };
 
 // ---------------------------------------------------------------
