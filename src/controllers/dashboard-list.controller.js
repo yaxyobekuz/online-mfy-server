@@ -108,8 +108,12 @@ const homeRow = (home) => ({
  */
 const buildRows = async (kind, run, userUid) => {
   const scope = await resolveScope(run, userUid);
-  const { allCadasters, pendingCadasters } = scope;
-  const pendingSet = new Set(pendingCadasters);
+  // Odamlar klassifikatsiyasi (pending/exists) collectStats bilan AYNI
+  // bo'lishi uchun "stats" pending'dan foydalanamiz: qayta navbatga
+  // qo'yilgan tugagan xonadonning odamlari "kutilmoqda" ga tushib
+  // ketmaydi.
+  const { allCadasters, statsPendingCadasters } = scope;
+  const pendingSet = new Set(statsPendingCadasters);
 
   if (kind === "homes") {
     const homes = await RegistrationHome.find({

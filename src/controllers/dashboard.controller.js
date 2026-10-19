@@ -261,13 +261,23 @@ export const MEMBER_KEY_EXPR = {
  * FAQAT tugagan kadastrlardagi urinishlar: pending kadastrdagi urinish
  * hali yakuniy emas, shuning uchun chiqarib tashlanadi.
  */
-export const memberScopeMatch = ({ runIds, randomRunIds, pendingCadasters }) => ({
+export const memberScopeMatch = ({
+  runIds,
+  randomRunIds,
+  statsPendingCadasters,
+}) => ({
   $or: [
     {
       // Kadastr yurishlaridagi yakuniy urinishlar.
+      //
+      // Chetlab o'tiladigani — FAQAT hech qachon ishlanmagan ("stats"
+      // bo'yicha pending) kadastrlar. Qayta navbatga qo'yilgan tugagan
+      // xonadonning eski urinishlari (added/exists/...) bu yerda
+      // qoladi — aks holda "Ro'yxatga olingan" soni qayta ishlashda
+      // noldan boshlanardi.
       runId: { $in: runIds },
-      ...(pendingCadasters.length
-        ? { cadasterNumber: { $nin: pendingCadasters } }
+      ...(statsPendingCadasters.length
+        ? { cadasterNumber: { $nin: statsPendingCadasters } }
         : {}),
     },
     {
@@ -335,12 +345,42 @@ export const resolveScope = async (run, userUid) => {
 
   const allCadasters = [...bestStatus.keys()];
 
-  // Hali ishlanmagan xonadonlar — "kutilmoqda" aynan shular
-  // bo'yicha hisoblanadi.
+  // Hali ishlanmagan xonadonlar — xonadon progressi (homesDone)
+  // aynan shular bo'yicha hisoblanadi.
   const pendingCadasters = allCadasters.filter(
     (cadaster) => !FINISHED_HOME_STATUSES.includes(bestStatus.get(cadaster)),
   );
-  return { runIds, randomRunIds, bestStatus, allCadasters, pendingCadasters };
+
+  // ALLAQACHON ishlangan kadastrlar: a'zo urinishi yozilgani bor.
+  //
+  // Nega kerak: "Boshlash" yangi fuqarolarni qo'shish uchun tugagan
+  // xonadonni qayta `pending` qiladi (syncResumeQueue). Bunday
+  // xonadon ESKI natijalari (allaqachon qo'shilgan odamlar) bilan
+  // qoladi — lekin joriy holati `pending`. Agar ODAMLAR hisobi
+  // joriy `pending` ga tayansa, o'sha odamlar "Ro'yxatga olingan"
+  // dan tushib, "kutilmoqda" ga sakrab ketadi (244 -> 30). Shuning
+  // uchun odamlar hisobida "kutilmoqda" FAQAT hech qachon ishlanmagan
+  // kadastrlar (yangi topilgan xonadonlar) bo'yicha ketadi.
+  const processedCadasters = new Set(
+    (
+      await RegistrationMember.distinct("cadasterNumber", {
+        runId: { $in: runIds },
+      })
+    ).filter(Boolean),
+  );
+
+  const statsPendingCadasters = pendingCadasters.filter(
+    (cadaster) => !processedCadasters.has(cadaster),
+  );
+
+  return {
+    runIds,
+    randomRunIds,
+    bestStatus,
+    allCadasters,
+    pendingCadasters,
+    statsPendingCadasters,
+  };
 };
 
 /**
@@ -380,8 +420,10 @@ export const collectStats = async (run, userUid) => {
   if (!run) return empty;
 
   const scope = await resolveScope(run, userUid);
-  const { allCadasters, pendingCadasters } = scope;
+  const { allCadasters, pendingCadasters, statsPendingCadasters } = scope;
 
+  // Xonadon progressi — JORIY pending bo'yicha (qayta ishlanayotgan
+  // xonadon ham "navbatda" ko'rinadi, progress haqiqiy bo'ladi).
   const homesTotal = allCadasters.length;
   const homesDone = homesTotal - pendingCadasters.length;
 
@@ -400,8 +442,8 @@ export const collectStats = async (run, userUid) => {
     // Xonadon tugagan bo'lsa, undagi HAMMA odam ko'rib chiqilgan:
     // kimdir kiritilgan, kimdir rad etilgan, kimdir allaqachon
     // ro'yxatda bo'lgan. Kutayotgani qolmaydi.
-    pendingCadasters.length
-      ? Citizen.countDocuments({ cadasterNumber: { $in: pendingCadasters } })
+    statsPendingCadasters.length
+      ? Citizen.countDocuments({ cadasterNumber: { $in: statsPendingCadasters } })
       : 0,
 
     // Urinishlar ODAM bo'yicha guruhlanadi: bir odam bir necha marta
