@@ -603,6 +603,156 @@ export const getDashboard = async (req, res) => {
  * ettiradi yoki yangisini boshlaydi — foydalanuvchi uchun farqi
  * yo'q.
  */
+/**
+ * "Boshlash" bosilganda yurish navbatini JORIY holatga moslaydi.
+ *
+ * Muammo: ishchi navbatni faqat RegistrationHome UMUMAN bo'lmaganda
+ * quradi (`runWorker`), "Boshlash" esa faqat eski buzilgan
+ * xonadonlarni qaytaradi. Shuning uchun yangi "Hisoblash" yoki yangi
+ * Excel'dan keyin paydo bo'lgan ma'lumot chetda qolardi: panel
+ * "512 xonadon / 2913 fuqaro topildi" desa ham, "Boshlash" darhol
+ * "qayta urinadigan yozuv qolmadi" deb to'xtardi.
+ *
+ * Bu funksiya ikki bo'shliqni yopadi:
+ *   1) "Hisoblash" topgan, lekin navbatda YO'Q xonadonlar (yangi
+ *      kadastrlar) — navbat oxiriga `pending` bo'lib qo'shiladi.
+ *   2) Tugagan xonadon kadastriga keyin YANGI fuqaro qo'shilgan
+ *      bo'lsa (uning JSHSHIR'i bu yurishda hali urinilmagan) — o'sha
+ *      xonadon qayta `pending` qilinadi.
+ *
+ * Qayta ishlash xavfsiz: ishchi allaqachon ro'yxatda turganlarni
+ * `takenPinfls` bilan o'tkazib yuboradi, ya'ni dublikat paydo
+ * bo'lmaydi.
+ */
+const syncResumeQueue = async (user, run) => {
+  const queueHomes = await RegistrationHome.find(
+    { runId: run._id },
+    "cadasterNumber status queueIndex",
+  ).lean();
+
+  const queuedKeys = new Set();
+  let maxIndex = -1;
+  for (const home of queueHomes) {
+    const key = cadasterKey(home.cadasterNumber);
+    if (key) queuedKeys.add(key);
+    if ((home.queueIndex ?? 0) > maxIndex) maxIndex = home.queueIndex ?? 0;
+  }
+
+  // --- 1) "Hisoblash" topgan, navbatda bo'lmagan yangi xonadonlar ---
+  //
+  // `Home` da faqat PLATFORMADA bor va kadastri fuqarolar bazasiga
+  // mos kelgan xonadonlar turadi (mahalla-scan shunday saqlaydi),
+  // shuning uchun ularning hammasini olish xavfsiz.
+  const scanned = await Home.find(
+    { userUid: user.uid },
+    "homeId streetId homeNum cadasterNumber fullName pinfl",
+  ).lean();
+
+  const inserts = [];
+  const seen = new Set();
+  let nextIndex = maxIndex + 1;
+
+  for (const home of scanned) {
+    const key = cadasterKey(home.cadasterNumber);
+    if (!key || queuedKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+
+    inserts.push({
+      runId: run._id,
+      queueIndex: nextIndex++,
+      homeId: String(home.homeId),
+      streetId: String(home.streetId),
+      homeNum: home.homeNum,
+      cadasterNumber: home.cadasterNumber,
+      ownerFullName: home.fullName,
+      ownerPinfl: home.pinfl ? String(home.pinfl) : null,
+      status: "pending",
+      userUid: user.uid,
+    });
+  }
+
+  if (inserts.length) await RegistrationHome.insertMany(inserts);
+
+  // --- 2) Tugagan xonadonlarda yangi fuqaro bo'lsa — qayta pending ---
+  const finished = queueHomes.filter((home) =>
+    FINISHED_HOME_STATUSES.includes(home.status),
+  );
+
+  let requeuedNew = 0;
+
+  if (finished.length) {
+    // Bu yurishda biror marta urinilgan JSHSHIR'lar (manba va
+    // tasdiqlangan — ikkalasi ham).
+    const attempted = new Set();
+    for (const field of ["pinfl", "verifiedPinfl"]) {
+      for (const pinfl of await RegistrationMember.distinct(field, {
+        runId: run._id,
+      })) {
+        if (pinfl) attempted.add(String(pinfl));
+      }
+    }
+
+    // Tugagan xonadon kadastrlari (raqam kaliti) -> xonadon _id'lari.
+    const finishedByKey = new Map();
+    for (const home of finished) {
+      const key = cadasterKey(home.cadasterNumber);
+      if (!key) continue;
+      const bucket = finishedByKey.get(key);
+      if (bucket) bucket.push(home._id);
+      else finishedByKey.set(key, [home._id]);
+    }
+
+    // Shu kadastrlarga mos keluvchi, bazadagi ASL kadastr yozilishlari
+    // (kadastr turlicha yoziladi — taqqoslash raqam bo'yicha).
+    const matchedOriginals = [];
+    for (const value of await Citizen.distinct("cadasterNumber")) {
+      const key = cadasterKey(value);
+      if (key && finishedByKey.has(key)) matchedOriginals.push(value);
+    }
+
+    if (matchedOriginals.length) {
+      const citizens = await Citizen.find(
+        { cadasterNumber: { $in: matchedOriginals }, pinfl: { $nin: [null, ""] } },
+        "cadasterNumber pinfl",
+      ).lean();
+
+      // Kadastr kalitida kamida bitta urinilmagan JSHSHIR bo'lsa —
+      // o'sha xonadon(lar) qayta ishlanishi kerak.
+      const keysWithNew = new Set();
+      for (const citizen of citizens) {
+        const key = cadasterKey(citizen.cadasterNumber);
+        if (!key || keysWithNew.has(key)) continue;
+        if (!attempted.has(String(citizen.pinfl))) keysWithNew.add(key);
+      }
+
+      const toRequeue = [];
+      for (const key of keysWithNew) {
+        for (const id of finishedByKey.get(key) ?? []) toRequeue.push(id);
+      }
+
+      if (toRequeue.length) {
+        const result = await RegistrationHome.updateMany(
+          { _id: { $in: toRequeue }, runId: run._id },
+          {
+            $set: { status: "pending" },
+            $unset: { reason: "", finishedAt: "", durationMs: "" },
+          },
+        );
+        requeuedNew = result.modifiedCount;
+      }
+    }
+  }
+
+  if (inserts.length || requeuedNew) {
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      { $set: { homesTotal: queueHomes.length + inserts.length } },
+    );
+  }
+
+  return { enqueued: inserts.length, requeuedNew };
+};
+
 export const controlDashboard = async (req, res) => {
   const user = requireUser(res);
   if (!user) return;
@@ -679,23 +829,24 @@ export const controlDashboard = async (req, res) => {
         // tarmoq uzilishi. Qolganlari (vafot etgan, boshqa xonadon
         // egasi, hujjat nuqsoni) qayta urinishdan o'zgarmaydi —
         // ularni qaytarish rate-limit ni bekorga sarflardi.
-        let requeued = 0;
 
-        // Shart yurish holati emas, NAVBAT: ishchi faqat
-        // `pending`/`processing` xonadonni oladi. Navbatda shunday
-        // yozuv bo'lsa, oddiy davom ettirish kifoya. Bo'lmasa,
-        // ishchi darhol chiqib ketardi — demak avval biror narsani
-        // navbatga qaytarishimiz kerak.
-        //
-        // Avval bu yerda `status === "done"` tekshirilardi va
-        // "to'xtatilgan" yurish navbati bo'sh bo'lsa-da davom
-        // ettirilaverardi (natijada hech narsa bo'lmasdi).
-        const queued = await RegistrationHome.countDocuments({
+        // Sinxronlashdan OLDINGI navbat: yurish allaqachon tugaganmi?
+        // Shu bo'yicha pastdagi "vaqtinchalik xatolarni qaytarish"
+        // mantig'i ishga tushadi.
+        const hadQueue = await RegistrationHome.countDocuments({
           runId: resumable._id,
           status: { $in: ["pending", "processing"] },
         });
 
-        if (!queued) {
+        // "Hisoblash"/yangi Excel'dan keyin paydo bo'lgan yangi
+        // xonadonlarni va tugagan xonadonlardagi yangi fuqarolarni
+        // navbatga qo'shamiz. Avval bu bo'lmagan — shuning uchun yangi
+        // topilganlar (yangi kadastr, yangi odam) "Boshlash" bosilsa
+        // ham ishlanmay qolardi.
+        const { enqueued, requeuedNew } = await syncResumeQueue(user, resumable);
+        let requeued = enqueued + requeuedNew;
+
+        if (!hadQueue) {
           // 1. A'ZO darajasidagi VAQTINCHALIK xatolar: tashqi server
           //    va tarmoq. Qolganlari (vafot etgan, boshqa xonadon
           //    egasi, hujjat nuqsoni) qayta urinishdan o'zgarmaydi —
@@ -760,7 +911,7 @@ export const controlDashboard = async (req, res) => {
 
         return res.status(202).json({
           message: requeued
-            ? `${requeued} ta xonadon qayta urinish uchun navbatga qaytarildi`
+            ? `${requeued} ta xonadon navbatga olindi`
             : "Davom ettirildi",
         });
       }
