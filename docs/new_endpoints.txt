@@ -1,4 +1,6 @@
-Ko'chalar: https://api.online-mahalla.uz/api/v1/pa_survey_general/cache/street?obl_id=3&area_id=308&district_id=308039&year=0&fp=5x2426994900&ts=497785&sig=f417ed95373b3fb35797a5728cbf9abcd285751ddb7f138c0bd2463e286474d5
+1. Ko'chalarni olish
+
+Endpoint: https://api.online-mahalla.uz/api/v1/pa_survey_general/cache/street?obl_id=3&area_id=308&district_id=308039&year=0&fp=5x2426994900&ts=497785&sig=f417ed95373b3fb35797a5728cbf9abcd285751ddb7f138c0bd2463e286474d5
 Response: {
     "total": 6,
     "results": [
@@ -30,7 +32,9 @@ Response: {
 }
 
 
-Ko'chadagi xonadonlar(paginated): https://api.online-mahalla.uz/web/v1/tables/pa_survey_general_info/data?_level=1&obl_id=3&area_id=308&district_id=308039&street_id=30800523&_mid=664&__tab=pa_survey_general_info&__type=table
+2. Ko'chadagi xonadonlar(paginated)ni olish
+
+Endpoint: https://api.online-mahalla.uz/web/v1/tables/pa_survey_general_info/data?_level=1&obl_id=3&area_id=308&district_id=308039&street_id=30800523&_mid=664&__tab=pa_survey_general_info&__type=table
 
 Response: {
     "data": {
@@ -69,7 +73,9 @@ Response: {
 }
 
 
-Xonadon egasi va kadastr raqami: https://api.online-mahalla.uz/web/v1/forms/pa_survey_v5/12065760?obl_id=3&area_id=308&district_id=308039&street_id=30800523
+3. Xonadon egasi va kadastr raqamini olish
+
+Endpoint: https://api.online-mahalla.uz/web/v1/forms/pa_survey_v5/12065760?obl_id=3&area_id=308&district_id=308039&street_id=30800523
 
 Response: {
     "id": 2290,
@@ -177,7 +183,9 @@ Response: {
 }
 
 
-xonadon oila a'zolari: https://api.online-mahalla.uz/web/v1/tables/pa_survey_v3_family/data?obl_id=3&area_id=308&district_id=308039&street_id=30800523&survey_uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
+4. Xonadon oila a'zolari olish
+
+Endpoint: https://api.online-mahalla.uz/web/v1/tables/pa_survey_v3_family/data?obl_id=3&area_id=308&district_id=308039&street_id=30800523&survey_uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
 
 
 Response: {
@@ -266,7 +274,9 @@ Response: {
 }
 
 
-Oila a'zosini ba'tafsil yuklash: https://api.online-mahalla.uz/web/v1/forms/survey_v3_family/8677488?_target=modal&pinfl=52002225110013&obl_id=3&area_id=308&district_id=308039&street_id=30800523&uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
+Xoandon a'zosini ba'tafsil ma'lumotlarini olish
+
+Endpoint: https://api.online-mahalla.uz/web/v1/forms/survey_v3_family/8677488?_target=modal&pinfl=52002225110013&obl_id=3&area_id=308&district_id=308039&street_id=30800523&uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
 
 Response: {
     "id": 763,
