@@ -274,7 +274,7 @@ Response: {
 }
 
 
-Xoandon a'zosini ba'tafsil ma'lumotlarini olish
+Xonadon a'zosini ba'tafsil ma'lumotlarini olish
 
 Endpoint: https://api.online-mahalla.uz/web/v1/forms/survey_v3_family/8677488?_target=modal&pinfl=52002225110013&obl_id=3&area_id=308&district_id=308039&street_id=30800523&uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
 

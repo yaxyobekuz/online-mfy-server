@@ -1,0 +1,79 @@
+Shaxsni so'nggi ma'lumotlarini qisqa yoki eski ma'lumotlari yordamida so'ngisini olib beradi. Bu endpoint'larni quyidagi maqsadlarda foydalanish mumkin: fuqaroni xonadon a'zosi sifatida kiritlinganida kiritib bo'
+
+1. Sana + pasport / ID karta
+
+Endpoint: https://api.online-mahalla.uz/api/v1/gcp/document?serial=AE&number=8520186&birth_date=1996-04-18&form_name=survey_homes_family
+
+Response: {
+    "code": 0,
+    "message": null,
+    "data": {
+        "full_name": "ABDUXOLIKOV BEXZODBEK MUXAMMADJON O‘G‘LI",
+        "birth_date": "1996-04-18",
+        "current_pinfl": 31804961370055,
+        "current_document": "AE8520186",
+        "documents": [
+            {
+                "type": "O‘zbekiston Respublikasi fuqarosining ID-kartasi",
+                "serial": "AE",
+                "number": "8520186",
+                "doc_status": "Yaroqli hujjat"
+            }
+        ]
+    }
+}
+
+
+2. Sana + pinfl
+
+Endpoint: https://api.online-mahalla.uz/api/v1/gcp/pinfl?pinfl=31804961370055&birth_date=1996-04-18&form_name=survey_homes_family
+
+Response: {
+    "code": 0,
+    "message": null,
+    "data": {
+        "full_name": "ABDUXOLIKOV BEXZODBEK MUXAMMADJON O‘G‘LI",
+        "birth_date": "1996-04-18",
+        "current_pinfl": 31804961370055,
+        "current_document": "AE8520186",
+        "documents": [
+            {
+                "type": "O‘zbekiston Respublikasi fuqarosining pasporti",
+                "serial": "AE",
+                "number": "8520186",
+                "doc_status": "Yaroqli hujjat"
+            }
+        ]
+    }
+}
+
+
+3. Sana + metrka (tug'ilganlik guvohnomasi)
+
+Endpoint: https://api.online-mahalla.uz/api/v2/fhdyo/act/birth?serial=I-AN&number=0893265&birth_date=2022-02-20
+
+Response: {
+    "code": 0,
+    "message": null,
+    "info": {
+        "data": {
+            "surname": "MIRZAYO‘LDOSHEV",
+            "name": "MUSTAFO",
+            "patronym": "XAYOTBEK O‘G‘LI",
+            "birth_date": "2022-02-20",
+            "pinfl": 52002225110013,
+            "cert_series": "I-AN",
+            "cert_number": "0893265",
+            "father_surname": "QODIROV",
+            "father_name": "XAYOTBEK",
+            "father_patronym": "MIRZAYO‘LDOSH O‘G‘LI",
+            "father_pinfl": 32010951310094,
+            "father_birth_date": "1995-10-20",
+            "mother_surname": "URALOVA",
+            "mother_name": "TILABATXON",
+            "mother_patronym": "XXX",
+            "mother_pinfl": 41511611310057,
+            "mother_birth_date": "1961-11-15"
+        }
+    }
+}
