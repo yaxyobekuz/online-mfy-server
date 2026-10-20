@@ -1,0 +1,314 @@
+Ko'chalar: https://api.online-mahalla.uz/api/v1/pa_survey_general/cache/street?obl_id=3&area_id=308&district_id=308039&year=0&fp=5x2426994900&ts=497785&sig=f417ed95373b3fb35797a5728cbf9abcd285751ddb7f138c0bd2463e286474d5
+Response: {
+    "total": 6,
+    "results": [
+        {
+            "id": 0,
+            "_rownum": 0,
+            "name": "номаълум",
+            "cadaster_count": 0,
+            "surveyed_count": 0,
+            "own": 0,
+            "rent": 0,
+            "population_total": 0,
+            "population_count": 0,
+            "youth": null,
+            "women": null,
+            "pensioner": null,
+            "financial_status1": 0,
+            "financial_status2": 0,
+            "financial_status3": 0,
+            "errors": 0,
+            "passed": 0,
+            "updated_at": null,
+            "geo_polygon": null,
+            "bot_confirmed": null,
+            "bot_rejected": null,
+            "repeat_number": 0
+        }
+    ]
+}
+
+
+Ko'chadagi xonadonlar(paginated): https://api.online-mahalla.uz/web/v1/tables/pa_survey_general_info/data?_level=1&obl_id=3&area_id=308&district_id=308039&street_id=30800523&_mid=664&__tab=pa_survey_general_info&__type=table
+
+Response: {
+    "data": {
+        "total": 182,
+        "results": [
+            {
+                "_rownum": 1,
+                "id": 12065788,
+                "uuid": "69460140-5348-46df-8bf6-bf1aa97b0249",
+                "home_num": "1",
+                "full_name": "ISAKOV ALIMARDON ISROILOVICH",
+                "pinfl": 33009785110027,
+                "home_type": 2,
+                "mobile_phone": "998770186101",
+                "is_repeated": false,
+                "ownership": "шахсий",
+                "confirmation": 1,
+                "telegram_bot": "тасдиқланган",
+                "financial_status": "биринчи тоифа",
+                "survey_date": "25.03.2023",
+                "new_score_calculated": 1,
+                "election_questionnaire": null,
+                "defects_info": "{\"ownership_defect\" : false, \"home_registered_defect\" : false, \"home_type_defect\" : false, \"mobile_defect\" : false, \"members_over20\" : false, \"phone_repeat\" : false, \"family_phone_defect\" : 0, \"relationship_defect\" : 0, \"employment_defect\" : 0, \"general_score\" : 2.50, \"family_score\" : 2.50, \"employment_score\" : 5.00}",
+                "geo_polygon": "null",
+                "election_link": "forms/election_questionnaire?obl_id=3&area_id=308&district_id=308039&street_id=30800523&survey_uuid=69460140-5348-46df-8bf6-bf1aa97b0249&_target=blank",
+                "pl_link": "forms/population_land_v3/8335284?idx=69460140-5348-46df-8bf6-bf1aa97b0249&_target=blank&year=2024",
+                "population_land": 8335284,
+                "family_financial_status": 1,
+                "doc_short_url": null,
+                "doc_link": "https://hujjat.uz/document/?pin=&id=",
+                "doc_guid": null,
+                "doc_pin": null
+            },
+        ]
+    }
+}
+
+
+Xonadon egasi va kadastr raqami: https://api.online-mahalla.uz/web/v1/forms/pa_survey_v5/12065760?obl_id=3&area_id=308&district_id=308039&street_id=30800523
+
+Response: {
+    "id": 2290,
+    "projectId": 29,
+    "name": "pa_survey_v5",
+    "isPublic": null,
+    "addTitle": "Сўровнома қўшиш",
+    "editTitle": "Сўровнома таҳрирлаш",
+    "addHeader": "Сўровнома қўшиш",
+    "editHeader": "Сўровнома таҳрирлаш<br>Андижон вилояти, Балиқчи тумани, Дўнгсарой маҳалласи, ул. Давлатобод - ABDUXOLIKOV BEXZODBEK MUXAMMADJON O‘G‘LI",
+    "canCreate": false,
+    "canEdit": false,
+    "canDelete": true,
+    "canHardDelete": false,
+    "canRestore": false,
+    "canClone": true,
+    "nextLink": "back",
+    "jsVersion": null,
+    "gridOffset": 1,
+    "focusedFieldName": "passport",
+
+    "attributes": {},
+    "params": {
+        "obl_id": 3,
+        "area_name": "Балиқчи тумани",
+        "pinfl": 32803761310068,
+        "area_id": 308,
+        "percent": 100,
+        "obl_name": "Андижон вилояти",
+        "full_name": "ABDUXOLIKOV BEXZODBEK MUXAMMADJON O‘G‘LI",
+        "street": "ул. Давлатобод",
+        "district": "Дўнгсарой маҳалласи",
+        "survey_date": "2026-10-15",
+        "district_id": 308039,
+        "street_id": 30800523,
+        "projectId": 29
+    },
+    "formData": {
+        "pinfl": 31804961370055,
+        "family_financial_status_changed": null,
+        "cadaster_list": [],
+        "women_notebook": [],
+        "recruitment_data": [],
+        "birth_date": "1996-04-18",
+        "iron_notebook": [],
+        "land_area": 8,
+        "geo_polygon": null,
+        "uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+        "verification_id": null,
+        "income_sources": [
+            {
+                "uuid": "9293d76f-a442-4d0a-8fd9-7e45dde3d139",
+                "income_type_id": 2,
+                "unit_id": 4,
+                "amount": 1,
+                "incomeTypeName": "Қорамол",
+                "unitName": "бош"
+            },
+            {
+                "uuid": "52df06b0-61cc-4a82-9464-8e283903f6c7",
+                "income_type_id": 8,
+                "unit_id": 7,
+                "amount": 10,
+                "incomeTypeName": "Узум кўчатлари",
+                "unitName": "туп"
+            }
+        ],
+        "passport": "AA9312796",
+        "doc_guid": null,
+        "unofficial_employment_note": null,
+        "mobile_phone": null,
+        "home_type": 2,
+        "study_data": [],
+        "social_register": [],
+        "unused_land": 0,
+        "address": "ULUGNOR TUMANI БОБУР МФЙ, ГУЛБАХОР КЎЧАСИ,  uy:18",
+        "subsidy_applications": [],
+        "pa_survey_crop_types": [
+            "10",
+            "2",
+            "11"
+        ],
+        "photo": [
+            "dcbf4fbfbdbf81cc3df45088"
+        ],
+        "home_num": "7",
+        "cadaster_number": "17:03:04:02:03:0005",
+        "young_notebook": [],
+        "doc_short_url": null,
+        "crop_type_other": null,
+        "full_name": "ABDUXOLIKOV BEXZODBEK MUXAMMADJON O‘G‘LI",
+        "ownership": 1,
+        "home_registered": 1,
+        "doc_pin": null,
+        "used_land": 8,
+        "survey_date": "2023-03-25",
+        "credit_applications": [],
+        "street_id": 30800523,
+        "pa_survey_desires_headers": [
+            "2"
+        ],
+        "owner_type": "Физическое лицо"
+    },
+    "components": []
+}
+
+
+xonadon oila a'zolari: https://api.online-mahalla.uz/web/v1/tables/pa_survey_v3_family/data?obl_id=3&area_id=308&district_id=308039&street_id=30800523&survey_uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
+
+
+Response: {
+    "data": {
+        "total": 7,
+        "results": [
+            {
+                "id": 12065760,
+                "section": 0,
+                "full_name": "ABDUXOLIKOV BEXZODBEK MUXAMMADJON O‘G‘LI",
+                "relationship": "хонадон эгаси",
+                "birth_date": "18.04.1996",
+                "pinfl": 31804961370055,
+                "phone": null,
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            },
+            {
+                "id": 8677487,
+                "section": 1,
+                "full_name": "KADIROV MIRZAYULDASH XXX",
+                "relationship": "Отаси",
+                "birth_date": "16.05.1954",
+                "pinfl": 31605541310018,
+                "phone": "998934123252",
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            },
+            {
+                "id": 8677488,
+                "section": 1,
+                "full_name": "MIRZAYO‘LDOSHEV MUSTAFO XAYOTBEK O‘G‘LI",
+                "relationship": "Ўғли",
+                "birth_date": "20.02.2022",
+                "pinfl": 52002225110013,
+                "phone": "998947453265",
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            },
+            {
+                "id": 8677485,
+                "section": 1,
+                "full_name": "QODIROV XAYOTBEK MIRZAYO‘LDOSH O‘G‘LI",
+                "relationship": "Укаси",
+                "birth_date": "20.10.1995",
+                "pinfl": 32010951310094,
+                "phone": "998993265321",
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            },
+            {
+                "id": 74804190,
+                "section": 1,
+                "full_name": "TOLIBJONOVA SHUKRONAXON AZAMATJON QIZI",
+                "relationship": "Бошқа",
+                "birth_date": "15.08.2018",
+                "pinfl": 60109185200112,
+                "phone": null,
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            },
+            {
+                "id": 8677486,
+                "section": 1,
+                "full_name": "URALOVA TILABATXON XXX",
+                "relationship": "Онаси",
+                "birth_date": "15.11.1961",
+                "pinfl": 41511611310057,
+                "phone": "998947432651",
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            },
+            {
+                "id": 74804215,
+                "section": 1,
+                "full_name": "ШАРОБИДДИНОВ ФАЗЛИДДИН СИРОЖИДДИН ЎҒЛИ",
+                "relationship": "Бошқа",
+                "birth_date": "24.04.2011",
+                "pinfl": 52404115110039,
+                "phone": null,
+                "survey_uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9",
+                "family_number": "1-оила"
+            }
+        ]
+    }
+}
+
+
+Oila a'zosini ba'tafsil yuklash: https://api.online-mahalla.uz/web/v1/forms/survey_v3_family/8677488?_target=modal&pinfl=52002225110013&obl_id=3&area_id=308&district_id=308039&street_id=30800523&uuid=9b9caee3-16f1-4ea2-94f0-fbfd796685f9
+
+Response: {
+    "id": 763,
+    "projectId": 29,
+    "name": "survey_v3_family",
+    "isPublic": null,
+    "addTitle": "Оила аъзосини киритиш",
+    "editTitle": "Оила аъзосини таҳрирлаш",
+    "addHeader": "Оила аъзосини киритиш. ",
+    "editHeader": "Оила аъзосини таҳрирлаш",
+    "canCreate": false,
+    "canEdit": false,
+    "canDelete": false,
+    "canHardDelete": false,
+    "canRestore": false,
+    "canClone": true,
+    "css": null,
+    "nextLink": "back",
+    "jsVersion": null,
+    "gridOffset": 0,
+    "focusedFieldName": null,
+    "attributes": {},
+    "params": {
+        "obl_id": 3,
+        "district_id": 308039,
+        "area_id": 308,
+        "street_id": 30800523,
+        "projectId": 29,
+        "uuid": "9b9caee3-16f1-4ea2-94f0-fbfd796685f9"
+    },
+    "formData": {
+        "pinfl": 52002225110013,
+        "full_name": "MIRZAYO‘LDOSHEV MUSTAFO XAYOTBEK O‘G‘LI",
+        "address": null,
+        "phone": "998947453265",
+        "birth_date": "2022-02-20",
+        "doc_serial": "AN",
+        "doc_number": "0893265",
+        "family_num": 1,
+        "relationship": 9,
+        "pa_survey_desires": [],
+        "document_type": 1
+    },
+    "components": []
+}
