@@ -13,7 +13,14 @@ const { Schema, model } = mongoose;
 const registrationMemberSchema = new Schema(
   {
     runId: { type: Schema.Types.ObjectId, ref: "RegistrationRun", required: true, index: true },
-    homeRowId: { type: Schema.Types.ObjectId, ref: "RegistrationHome", required: true, index: true },
+
+    // Navbatdagi xonadon yozuvi.
+    //
+    // MAJBURIY EMAS: kadastrsiz rejimda navbat xonadonlar bo'yicha
+    // emas, FUQAROLAR bo'yicha ketadi (odamni xonadonga bog'laydigan
+    // kadastr yo'q — xonadon joyida, familiya bo'yicha tanlanadi).
+    // Shunday yurishda `RegistrationHome` qatori umuman bo'lmaydi.
+    homeRowId: { type: Schema.Types.ObjectId, ref: "RegistrationHome", index: true },
 
     cadasterNumber: { type: String, index: true },
     homeId: { type: String },
@@ -61,6 +68,23 @@ const registrationMemberSchema = new Schema(
 
     // Platformada yaratilgan a'zo ID'si.
     memberId: { type: String },
+
+    // Yuborilgan telefon raqami. Manbada bo'lmasa avto-generate
+    // qilinadi ("Qo'shimcha a'zolar" va "Kadastrsiz" rejimlari),
+    // shuning uchun aynan nima yuborilgani saqlanadi.
+    phone: { type: String },
+
+    // --- Kadastrsiz rejim: taqsimlash qanday bo'lgani ---
+    //
+    // "familiya" — xonadon egasining familiyasi mos keldi (odam
+    //              o'z oilasiga tushdi);
+    // "random"   — mos xonadon topilmadi, bo'sh joyi borga qo'yildi.
+    //
+    // Xodim hisobotda "bu odam haqiqatan shu oilaga tegishlimi yoki
+    // tasodifiy joygami" degan savolga javob topishi kerak.
+    matchVia: { type: String },
+    // Mos kelgan xonadon egasining F.I.Sh. — tekshirish uchun.
+    matchedOwnerFullName: { type: String },
 
     // --- Holat ---
     // pending  — navbatda

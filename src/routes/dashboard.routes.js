@@ -5,6 +5,7 @@ import {
   getDashboardMember,
   randomStart,
   extraStart,
+  uncadastredStart,
   getStreetSettings,
   updateStreetSettings,
 } from "../controllers/dashboard.controller.js";
@@ -54,7 +55,9 @@ router.get("/dashboard/homes/:homeId", getDashboardHome);
 router.get("/dashboard/report", getDashboardReport);
 router.post("/dashboard/control", controlDashboard);
 router.post("/dashboard/random-start", randomStart);
- router.post("/dashboard/extra-start", extraStart);
+router.post("/dashboard/extra-start", extraStart);
+// "Kadastrsiz boshlash" — kadastrsiz bazadan familiya bo'yicha moslab kiritadi.
+router.post("/dashboard/uncadastred-start", uncadastredStart);
 router.get("/dashboard", getDashboard);
 
 router.get("/statistics", getStatistics);

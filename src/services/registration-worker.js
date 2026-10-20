@@ -36,6 +36,8 @@ import RegistrationRun from "../models/RegistrationRun.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import MfyToken from "../models/MfyToken.js";
+import UncadastredCitizen from "../models/UncadastredCitizen.js";
+import UncadastredGroup from "../models/UncadastredGroup.js";
 import User from "../models/User.js";
 import { withRateLimit } from "../utils/rate-limit.js";
 import { requestContext } from "../utils/request-context.js";
@@ -45,6 +47,7 @@ import {
   sameMahalla,
 } from "../utils/mahalla.js";
 import { cadasterKey } from "../utils/cadaster.js";
+import { surnameKey, fullNameSurnameKey } from "../utils/surname.js";
 import { randomUzPhone, normalizePhone } from "../utils/phone.js";
 import {
   toIsoDate,
@@ -2653,11 +2656,13 @@ export const runRegistration = async (user, runDoc, token) => {
   // tayanmaymiz: bu yerda ataylab yangi kontekst ochiladi, shunda
   // yurish server qayta ishga tushgandan keyin ham (saqlangan token
   // bilan) davom eta oladi.
-  const worker = runDoc.extraMode
-    ? runExtraWorker
-    : runDoc.randomMode
-      ? runRandomWorker
-      : runWorker;
+  const worker = runDoc.uncadastredMode
+    ? runUncadastredWorker
+    : runDoc.extraMode
+      ? runExtraWorker
+      : runDoc.randomMode
+        ? runRandomWorker
+        : runWorker;
   // `mahallaUid` ham qo'yiladi: `api.js` dagi javob interceptori 401
   // kelganda tokenni "eskirgan" deb AYNAN shu uid bo'yicha belgilaydi.
   // Usiz fon ishchisining 401 lari hech qayerga yozilmasdi — panel
@@ -3317,6 +3322,843 @@ const runWorker = async (user, runDoc) => {
         },
       },
     );
+
+    pushRunLog(run._id, {
+      level: "error",
+      message: `Jarayon to'xtadi: ${err.message}`,
+    });
+  } finally {
+    activeRuns.delete(runId);
+    clearControlCache(runId);
+
+    // Egalikni bo'shatamiz — boshqa server davom ettira olsin.
+    await RegistrationRun.updateOne(
+      { _id: run._id, ownerId: SERVER_ID },
+      { $set: { ownerId: null, ownerName: null } },
+    ).catch(() => {});
+  }
+};
+
+// ---------------------------------------------------------------
+// Kadastrsiz rejim — familiya bo'yicha moslash + random taqsimlash
+// ---------------------------------------------------------------
+
+/**
+ * Platformadagi xonadonlarni yuklab, ularni FAMILIYA KALITI bo'yicha
+ * indekslaydi.
+ *
+ * Nega kerak: kadastrsiz bazada kadastr yo'q, ya'ni odamni xonadonga
+ * bog'laydigan yagona ishora — FAMILIYA. Xonadon egasi "ERGASHEV
+ * SUXBATJON" bo'lsa, bazadagi "ERGASHEV XUDOYBERDI" aynan shu
+ * xonadonga tushishi kerak: ular bir oila.
+ *
+ * Indeks bir marta quriladi va butun yurish davomida ishlatiladi —
+ * aks holda har fuqaro uchun ko'chalar qayta yuklanib, rate-limit
+ * behuda sarflanardi.
+ *
+ * Qaytaradi:
+ *   homes      — barcha xonadonlar (random taqsimlash uchun)
+ *   bySurname  — familiya kaliti -> xonadonlar ro'yxati
+ */
+const buildHomeIndex = async (user, run, excludedStreetIds) => {
+  await RegistrationRun.updateOne(
+    { _id: run._id },
+    { $set: { stage: "Ko'chalar yuklanmoqda" } },
+  );
+
+  const allStreets = await fetchStreets(user, run);
+
+  // Sozlamalarda taqiqlangan ko'chalar ("номаълум" kabi texnik
+  // ko'chalar) — bu rejimda ham chetlab o'tiladi.
+  const streets = allStreets.filter(
+    (street) => !excludedStreetIds.has(String(street.id)),
+  );
+
+  if (!streets.length) {
+    throw new Error(
+      allStreets.length
+        ? "Ruxsat etilgan ko'chalar yo'q — sozlamalarni tekshiring"
+        : "Ko'chalar topilmadi — token o'z MFY ingizga tegishli bo'lishi kerak",
+    );
+  }
+
+  pushRunLog(run._id, {
+    level: "info",
+    message: `${streets.length} ko'cha topildi — xonadonlar yuklanmoqda`,
+  });
+
+  const homes = [];
+  const bySurname = new Map();
+
+  for (const [index, street] of streets.entries()) {
+    const control = await readControl(run);
+    if (control !== "run") return { homes, bySurname, interrupted: control };
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          stage: `Ko'chalar: ${index + 1}/${streets.length} — ${street.name}`,
+          heartbeatAt: new Date(),
+        },
+      },
+    );
+
+    let streetHomes = [];
+
+    try {
+      streetHomes = await fetchStreetHomes(user, String(street.id), run);
+    } catch (err) {
+      // Bitta ko'cha yuklanmasa qolganlari davom etadi — butun
+      // yurish to'xtamasin (kadastr rejimidagi bilan bir xil qoida).
+      pushRunLog(run._id, {
+        level: "error",
+        message: `"${street.name}" ko'chasi yuklanmadi: ${describeError(err)}`,
+      });
+      continue;
+    }
+
+    for (const home of streetHomes) {
+      const entry = {
+        homeId: String(home.id),
+        streetId: String(street.id),
+        streetName: street.name,
+        homeNum: home.home_num,
+        cadasterNumber: home.cadaster_number ?? null,
+        ownerFullName: home.full_name ?? null,
+        ownerPinfl: home.pinfl != null ? String(home.pinfl) : null,
+        // Egasining familiya kaliti — moslashning asosi.
+        ownerSurnameKey: fullNameSurnameKey(home.full_name),
+        // Xonadonda hozir nechta a'zo bor. Dastlab noma'lum: xonadon
+        // kerak bo'lganda bir marta so'raladi va shu yerda eslanadi
+        // (har fuqaro uchun qayta so'rash rate-limitni yeb qo'yardi).
+        memberCount: null,
+        surveyUuid: null,
+      };
+
+      homes.push(entry);
+
+      if (entry.ownerSurnameKey) {
+        const bucket = bySurname.get(entry.ownerSurnameKey);
+        if (bucket) bucket.push(entry);
+        else bySurname.set(entry.ownerSurnameKey, [entry]);
+      }
+    }
+  }
+
+  if (!homes.length) {
+    throw new Error(
+      `Xonadonlar topilmadi: tashqi API ${streets.length} ko'cha qaytardi, lekin ularda xonadon yo'q. Token o'z MFY ingizga tegishli bo'lishi kerak.`,
+    );
+  }
+
+  pushRunLog(run._id, {
+    level: "info",
+    message: `${homes.length} xonadon yuklandi — ${bySurname.size} xil familiya aniqlandi`,
+  });
+
+  return { homes, bySurname, interrupted: null };
+};
+
+/**
+ * Xonadonning `survey_uuid` va hozirgi a'zolari soni.
+ *
+ * Ikkalasi ham a'zo qo'shish uchun majburiy, lekin ro'yxat
+ * endpointi ularni bermaydi. Bir marta so'raladi va xonadon
+ * yozuvida eslanadi.
+ *
+ * Qaytaradi: xonadon ishlatishga yaroqlimi (survey_uuid bormi).
+ */
+const loadHomeState = async (user, run, home, knownPinfls) => {
+  if (home.memberCount !== null) return home.memberCount !== Infinity;
+
+  if (!home.surveyUuid) {
+    let formData = null;
+
+    try {
+      formData = await fetchHomeForm(user, home.homeId, run);
+    } catch (err) {
+      // Token eskirgan — butun yurishning muammosi, yuqoriga uzatamiz.
+      if (isAuthError(err)) throw new TokenExpiredError();
+
+      // Bu xonadon o'qilmadi — boshqa urinmaymiz, keyingisiga o'tamiz.
+      home.memberCount = Infinity;
+      return false;
+    }
+
+    if (!formData?.survey_uuid) {
+      home.memberCount = Infinity;
+      return false;
+    }
+
+    home.surveyUuid = formData.survey_uuid;
+    if (formData.pinfl) home.ownerPinfl = String(formData.pinfl);
+    if (formData.full_name) {
+      home.ownerFullName = formData.full_name;
+      home.ownerSurnameKey =
+        home.ownerSurnameKey ?? fullNameSurnameKey(formData.full_name);
+    }
+  }
+
+  const members = await fetchFamilyMembers(
+    user,
+    home.streetId,
+    home.surveyUuid,
+    run,
+  ).catch((err) => {
+    if (isAuthError(err)) throw new TokenExpiredError();
+    return [];
+  });
+
+  home.memberCount = members.length;
+
+  // Platformada turganlar qayta yuborilmaydi.
+  for (const person of members) {
+    if (person.pinfl) knownPinfls.add(String(person.pinfl));
+  }
+  if (home.ownerPinfl) knownPinfls.add(String(home.ownerPinfl));
+
+  return true;
+};
+
+// Platformada bitta xonadonga cheklangan sondagi a'zo sig'adi
+// ("хонадонга N тадан зиёд оила азоси киритиш мумкин эмас").
+// Amalda N = 20, ba'zi xonadonlarda 15.
+const UNCADASTRED_HOME_LIMIT = 20;
+
+/**
+ * Bitta kadastrsiz fuqaro uchun XONADON TANLAYDI.
+ *
+ * Tartib:
+ *   1. FAMILIYA bo'yicha: egasining familiyasi mos keladigan va
+ *      bo'sh joyi bor xonadon. Bir familiyada bir nechta xonadon
+ *      bo'lsa — eng bo'shi (kamroq a'zoli), shunda bitta xonadonga
+ *      tiqilib qolmaydi.
+ *   2. Mos xonadon bo'lmasa — RANDOM: bo'sh joyi bor ixtiyoriy
+ *      xonadon.
+ *
+ * Qaytaradi: { home, via: "familiya" | "random" } yoki null.
+ */
+const pickHomeFor = async (
+  user,
+  run,
+  citizen,
+  homeIndex,
+  knownPinfls,
+  randomCursor,
+) => {
+  const { homes, bySurname } = homeIndex;
+
+  const hasRoom = (home) =>
+    home.memberCount !== null &&
+    home.memberCount !== Infinity &&
+    home.memberCount < UNCADASTRED_HOME_LIMIT;
+
+  // --- 1. Familiya bo'yicha ---
+  const key = citizen.lastNameKey ?? surnameKey(citizen.lastName);
+
+  if (key) {
+    const bucket = bySurname.get(key) ?? [];
+
+    // Holati noma'lum xonadonlarni bir marta so'raymiz. FAQAT shu
+    // familiyadagilar — hammasi emas (rate-limit tejaladi).
+    for (const home of bucket) {
+      if (home.memberCount !== null) continue;
+      if ((await readControlCached(run)) !== "run") break;
+
+      await loadHomeState(user, run, home, knownPinfls);
+    }
+
+    // Eng bo'sh xonadon — a'zolar tarqalib joylashsin.
+    const matched = bucket
+      .filter(hasRoom)
+      .sort((a, b) => a.memberCount - b.memberCount)[0];
+
+    if (matched) return { home: matched, via: "familiya" };
+  }
+
+  // --- 2. Random ---
+  //
+  // "Random" bu yerda "har safar tasodifiy xonadon" degani emas:
+  // har fuqaro uchun tasodifiy tanlasak, bitta xonadon bir necha
+  // bor tekshirilib, holati noma'lumlari uchun qayta-qayta so'rov
+  // ketardi. Buning o'rniga xonadonlar ro'yxati yurish boshida BIR
+  // MARTA aralashtiriladi va shu tartibda ketma-ket to'ldiriladi —
+  // natija ham tasodifiy, ham tejamkor.
+  while (randomCursor.index < homes.length) {
+    const home = homes[randomCursor.index];
+
+    if (home.memberCount === null) {
+      if ((await readControlCached(run)) !== "run") return null;
+      await loadHomeState(user, run, home, knownPinfls);
+    }
+
+    if (hasRoom(home)) return { home, via: "random" };
+
+    // Bu xonadon to'la yoki yaroqsiz — keyingisiga o'tamiz va
+    // boshqa qaytmaymiz.
+    randomCursor.index += 1;
+  }
+
+  return null;
+};
+
+/**
+ * Bitta kadastrsiz fuqaroni platformaga oila a'zosi sifatida
+ * yuboradi.
+ *
+ * Davlat bazasidan QAYTA TEKSHIRILMAYDI — "Qo'shimcha a'zolar"
+ * rejimidagi bilan bir xil qoida: ma'lumot xodim tayyorlagan
+ * fayldan olingan, GCP so'rovi esa faqat rate-limitni sarflardi.
+ * JSHSHIR to'g'riligini platformaning o'zi tekshiradi.
+ *
+ * Qaytaradi: "added" | "exists" | "failed" | "skipped" | "home_full"
+ */
+const postUncadastredMember = async (user, run, home, citizen, via) => {
+  const startedAt = Date.now();
+  const pinfl = citizen.pinfl ? String(citizen.pinfl) : null;
+
+  const finish = (fields) =>
+    RegistrationMember.updateOne(
+      // Dedup kaliti: bir odam bir xonadonga ikki marta yozilmasin.
+      // Kadastr yo'q, shuning uchun homeId bo'yicha.
+      { runId: run._id, homeId: home.homeId, pinfl },
+      {
+        $set: {
+          runId: run._id,
+          cadasterNumber: home.cadasterNumber ?? null,
+          homeId: home.homeId,
+          citizenId: citizen._id,
+          fullName: citizen.fullName,
+          birthDate: citizen.birthDate,
+          document: citizen.document ?? null,
+          pinfl,
+          userUid: user.uid,
+          durationMs: Date.now() - startedAt,
+          attemptedAt: new Date(),
+          ...fields,
+        },
+      },
+      { upsert: true },
+    );
+
+  // JSHSHIR yo'q — platforma a'zo qo'sha olmaydi (majburiy maydon).
+  if (!pinfl) {
+    await finish({
+      status: "skipped",
+      reason: "JSHSHIR yo'q",
+      reasonCode: "pinfl_yoq",
+    });
+
+    pushRunLog(run._id, {
+      level: "skip",
+      fullName: citizen.fullName,
+      message: "JSHSHIR yo'q — kiritilmadi",
+    });
+
+    return "skipped";
+  }
+
+  const isoBirthDate = toIsoDate(citizen.birthDate);
+
+  if (!isoBirthDate) {
+    await finish({
+      status: "skipped",
+      reason: "Tug'ilgan sana noto'g'ri yoki yo'q",
+      reasonCode: "sana_notogri",
+    });
+
+    pushRunLog(run._id, {
+      level: "skip",
+      fullName: citizen.fullName,
+      message: "Tug'ilgan sana yo'q — kiritilmadi",
+    });
+
+    return "skipped";
+  }
+
+  // Telefon: faylda bo'lsa o'zi, bo'lmasa avto-generate
+  // ("Qo'shimcha a'zolar" rejimidagi bilan bir xil mantiq).
+  const phone = normalizePhone(citizen.phone) ?? randomUzPhone();
+
+  const age = yearsOld(isoBirthDate);
+
+  const payload = {
+    pinfl: Number(pinfl),
+    full_name: citizen.fullName,
+    address: null,
+    phone,
+    birth_date: isoBirthDate,
+    study_level_id: String(pickStudyLevel(age, pinfl)),
+    doc_serial: citizen.documentSeries ?? "",
+    doc_number: citizen.documentNumber ?? "",
+    // Qarindoshlik: faylda ko'rsatilgan bo'lsa o'shani, bo'lmasa
+    // "Boshqa". Kadastr rejimida har doim "Boshqa" edi — u yerdagi
+    // manbada bu ustun umuman yo'q; kadastrsiz faylda esa bor.
+    relationship: String(citizen.relationshipCode ?? DEFAULT_RELATIONSHIP),
+    document_type: String(
+      isBirthCertificate(citizen.documentSeries) ? 2 : 1,
+    ),
+  };
+
+  const params = {
+    _target: "modal",
+    pinfl,
+    obl_id: user.oblId,
+    area_id: user.areaId,
+    district_id: user.districtId,
+    street_id: home.streetId,
+    survey_uuid: home.surveyUuid,
+    owner_pinfl: home.ownerPinfl,
+  };
+
+  // Taqsimlash qanday bo'lganini yozib qo'yamiz: xodim hisobotda
+  // "bu odam o'z oilasiga tushdimi yoki tasodifiy joygami" degan
+  // savolga javob topishi kerak.
+  const viaFields = {
+    sentPayload: payload,
+    sentParams: params,
+    relationshipCode: payload.relationship,
+    studyLevelCode: payload.study_level_id,
+    phone,
+    matchVia: via,
+    matchedOwnerFullName: home.ownerFullName ?? null,
+  };
+
+  pushRunLog(run._id, {
+    level: "request",
+    fullName: citizen.fullName,
+    message:
+      `POST — ${pinfl}, ${age} yosh, ` +
+      `${via === "familiya" ? `familiya mos (${home.ownerFullName ?? "?"})` : "random"}, ` +
+      `${home.homeNum ?? home.homeId}-uy`,
+  });
+
+  try {
+    const response = await postFamilyMember(payload, params, run);
+
+    await finish({
+      ...viaFields,
+      status: "added",
+      memberId: response?.id != null ? String(response.id) : null,
+      platformResponse: response ?? null,
+      httpStatus: 200,
+      reason: null,
+      reasonCode: null,
+    });
+
+    // Xonadonda bitta joy kamaydi.
+    if (Number.isFinite(home.memberCount)) home.memberCount += 1;
+
+    pushRunLog(run._id, {
+      level: "success",
+      fullName: citizen.fullName,
+      message: `Qo'shildi — ${home.homeNum ?? home.homeId}-uy (${via === "familiya" ? "familiya bo'yicha" : "random"})`,
+      ms: Date.now() - startedAt,
+    });
+
+    return "added";
+  } catch (err) {
+    // Token eskirgan — bu fuqaroning emas, butun yurishning
+    // muammosi. Yuqoriga uzatamiz: yurish pauza qilinadi.
+    if (isAuthError(err)) throw new TokenExpiredError();
+
+    const reason = describeError(err);
+    const reasonCode = reasonCodeOf(reason);
+
+    // Xonadon to'lgan bo'lsa — bu odamning aybi emas. Xonadonni
+    // to'la deb belgilaymiz va odam KEYINGI xonadonda qayta
+    // urinadi (chaqiruvchi "home_full" dan shuni biladi). Yozuv
+    // YARATILMAYDI: aks holda bitta odam uchun bir nechta "xato"
+    // qatori paydo bo'lib, hisobot buzilardi.
+    if (/зиёд|ziyod|оила\s+аъзоси\s+киритиш|оила\s+азоси\s+киритиш/i.test(reason)) {
+      home.memberCount = UNCADASTRED_HOME_LIMIT;
+
+      pushRunLog(run._id, {
+        level: "info",
+        message: `${home.homeNum ?? home.homeId}-uy to'ldi — keyingi xonadonga o'tiladi`,
+      });
+
+      return "home_full";
+    }
+
+    const place = parseRegisteredPlace(reason);
+
+    await finish({
+      ...viaFields,
+      status: reasonCode === "allaqachon_mavjud" ? "exists" : "failed",
+      reason,
+      reasonCode,
+      platformResponse: err.response?.data ?? null,
+      httpStatus: err.response?.status ?? null,
+      ...(place
+        ? {
+            registeredRegion: place.region,
+            registeredMahalla: place.mahalla,
+            movedAway: !sameMahalla(place.mahalla, run.mahallaName),
+          }
+        : {}),
+    });
+
+    pushRunLog(run._id, {
+      level: reasonCode === "allaqachon_mavjud" ? "skip" : "error",
+      fullName: citizen.fullName,
+      message: reason,
+      status: err.response?.status,
+      ms: Date.now() - startedAt,
+    });
+
+    return reasonCode === "allaqachon_mavjud" ? "exists" : "failed";
+  }
+};
+
+/**
+ * KADASTRSIZ rejim ishchisi.
+ *
+ * Kadastr rejimidan farqi: navbat XONADONLAR bo'yicha emas,
+ * FUQAROLAR bo'yicha ketadi — chunki odamni xonadonga bog'laydigan
+ * kadastr yo'q. Har fuqaro uchun xonadon joyida tanlanadi:
+ * familiyasi mos keladigani bo'lsa o'shanisi, bo'lmasa random.
+ */
+const runUncadastredWorker = async (user, runDoc) => {
+  const runId = String(runDoc._id);
+  const run = runDoc;
+
+  // Sozlamadagi avtomatik to'xtash chegarasi (har "Boshlash" da
+  // noldan) — bu rejim ham platformaga odam qo'shadi.
+  const session = await newSession(user.uid);
+
+  try {
+    const fresh = await RegistrationRun.findById(run._id).lean();
+
+    const groupId = fresh?.uncadastredGroupId;
+    if (!groupId) throw new Error("MFY guruhi tanlanmagan");
+
+    const group = await UncadastredGroup.findById(groupId).lean();
+    if (!group) {
+      throw new Error("MFY guruhi topilmadi — o'chirilgan bo'lishi mumkin");
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "preparing",
+          error: null,
+          stage: `"${group.name}" guruhi tayyorlanmoqda`,
+          startedAt: run.startedAt ?? new Date(),
+          heartbeatAt: new Date(),
+        },
+      },
+    );
+
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Kadastrsiz rejim — "${group.name}" guruhi (${group.total ?? 0} ta yozuv)`,
+    });
+
+    // --- Allaqachon band JSHSHIR'lar ---
+    //
+    // Bir odam bazada bir necha bor uchrashi mumkin, bundan tashqari
+    // oldingi yurishlarda qo'shilgan yoki "boshqa xonadonda bor" deb
+    // rad etilgan bo'lishi mumkin. Bunday odamga qayta so'rov
+    // yubormaymiz — rate-limit tejaladi.
+    const knownPinfls = new Set();
+
+    for (const filter of [
+      { userUid: user.uid, status: { $in: ["added", "exists"] } },
+      {
+        userUid: user.uid,
+        reasonCode: {
+          $in: [
+            "boshqa_xonadon_egasi",
+            "boshqa_xonadon_azosi",
+            "allaqachon_mavjud",
+          ],
+        },
+      },
+      // O'zgarmas sabab bilan chetda qolganlar (vafot etgan, hujjati
+      // yaroqsiz) — javob o'zgarmaydi.
+      { userUid: user.uid, reasonCode: { $in: PERMANENT_REASON_CODES } },
+    ]) {
+      for (const field of ["pinfl", "verifiedPinfl"]) {
+        for (const pinfl of await RegistrationMember.distinct(field, filter)) {
+          if (pinfl) knownPinfls.add(String(pinfl));
+        }
+      }
+    }
+
+    pushRunLog(run._id, {
+      level: "info",
+      message: `${knownPinfls.size} ta JSHSHIR allaqachon band — ularga so'rov yuborilmaydi`,
+    });
+
+    // --- Xonadonlar indeksi ---
+    const excludedStreetIds = new Set(
+      (fresh.randomExcludedStreetIds ?? []).map((id) => String(id)),
+    );
+
+    const homeIndex = await buildHomeIndex(user, run, excludedStreetIds);
+
+    if (homeIndex.interrupted) {
+      const paused = homeIndex.interrupted === "pause";
+
+      await RegistrationRun.updateOne(
+        { _id: run._id },
+        {
+          $set: {
+            status: paused ? "paused" : "stopped",
+            stage: paused ? "To'xtatib turildi" : "To'xtatildi",
+            finishedAt: paused ? null : new Date(),
+          },
+        },
+      );
+      return;
+    }
+
+    // Random taqsimlash uchun xonadonlarni BIR MARTA aralashtiramiz
+    // (`pickHomeFor` izohiga qarang). Fisher–Yates.
+    const shuffled = [...homeIndex.homes];
+    for (let i = shuffled.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    homeIndex.homes = shuffled;
+
+    const randomCursor = { index: 0 };
+
+    // --- Fuqarolar navbati ---
+    //
+    // Bir so'rovda hammasini olmaymiz: guruhda o'n minglab yozuv
+    // bo'lishi mumkin. Bo'laklab o'qiymiz — `_id` bo'yicha oldinga
+    // siljib (`skip` ishlatmasdan: katta kolleksiyada u sekinlashadi).
+    const BATCH = 500;
+    let lastId = null;
+
+    let added = 0;
+    let failed = 0;
+    let skipped = 0;
+    let exists = 0;
+    let bySurnameCount = fresh.matchedBySurname ?? 0;
+    let randomlyCount = fresh.matchedRandomly ?? 0;
+    let processed = 0;
+    let outOfHomes = false;
+
+    const total = await UncadastredCitizen.countDocuments({ groupId });
+
+    if (!total) {
+      throw new Error(
+        `"${group.name}" guruhida yozuv yo'q — avval Excel yuklang`,
+      );
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "running",
+          membersTotal: total,
+          stage: `Kadastrsiz — 0/${total}`,
+          heartbeatAt: new Date(),
+        },
+      },
+    );
+
+    outer: for (;;) {
+      const control = await readControl(run);
+      if (control !== "run") {
+        const paused = control === "pause";
+
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          {
+            $set: {
+              status: paused ? "paused" : "stopped",
+              stage: paused ? "To'xtatib turildi" : "To'xtatildi",
+              waitingUntil: null,
+              finishedAt: paused ? null : new Date(),
+            },
+          },
+        );
+
+        pushRunLog(run._id, {
+          level: "info",
+          message: paused ? "Jarayon to'xtatib turildi" : "Jarayon to'xtatildi",
+        });
+        return;
+      }
+
+      const batch = await UncadastredCitizen.find({
+        groupId,
+        ...(lastId ? { _id: { $gt: lastId } } : {}),
+      })
+        .sort({ _id: 1 })
+        .limit(BATCH)
+        .lean();
+
+      if (!batch.length) break;
+
+      for (const citizen of batch) {
+        // Boshqaruv tugmasi — har odamdan oldin (keshlangan o'qish:
+        // tugma bosilgani darhol sezilsin, lekin har odamda bazaga
+        // borilmasin).
+        //
+        // `continue outer` — tashqi sikl boshiga qaytadi va u yerda
+        // boshqaruv KESHSIZ o'qiladi: yurish to'g'ri holat bilan
+        // yopiladi. Bu yerda `lastId` ataylab SURILMAYDI (pastda,
+        // odam ishlanganidan keyin suriladi) — aks holda to'xtatish
+        // paytida partiyaning qolgan qismi o'tkazib yuborilardi va
+        // davom ettirilganda ular umuman ishlanmasdi.
+        if ((await readControlCached(run)) !== "run") continue outer;
+
+        // Sozlamadagi chegara.
+        if (await reachedLimit(session)) {
+          await stopRunAtLimit(run, session);
+          return;
+        }
+
+        processed += 1;
+
+        // Allaqachon band JSHSHIR — so'rov yubormaymiz.
+        const pinfl = citizen.pinfl ? String(citizen.pinfl) : null;
+
+        if (pinfl && knownPinfls.has(pinfl)) {
+          skipped += 1;
+          // DIQQAT: `lastId` shu yerda ham suriladi. Aks holda
+          // butunlay o'tkazib yuborilgan partiya (hammasi band
+          // JSHSHIR) qayta-qayta o'qilib, sikl cheksiz aylanardi.
+          lastId = citizen._id;
+          continue;
+        }
+
+        // Xonadon tanlaymiz. Tanlangan xonadon to'lib qolsa
+        // (platforma rad etsa), keyingisida qayta urinamiz.
+        let result = null;
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const picked = await pickHomeFor(
+            user,
+            run,
+            citizen,
+            homeIndex,
+            knownPinfls,
+            randomCursor,
+          );
+
+          if (!picked) break;
+
+          result = await postUncadastredMember(
+            user,
+            run,
+            picked.home,
+            citizen,
+            picked.via,
+          );
+
+          if (result !== "home_full") {
+            if (result === "added") {
+              if (picked.via === "familiya") bySurnameCount += 1;
+              else randomlyCount += 1;
+            }
+            break;
+          }
+
+          result = null;
+        }
+
+        if (result === null) {
+          // Bo'sh joyi bor xonadon qolmadi — davom etish befoyda.
+          outOfHomes = true;
+          break outer;
+        }
+
+        if (result === "added") {
+          added += 1;
+          session.added += 1;
+          if (pinfl) knownPinfls.add(pinfl);
+        } else if (result === "exists") {
+          exists += 1;
+          if (pinfl) knownPinfls.add(pinfl);
+        } else if (result === "failed") {
+          failed += 1;
+        } else {
+          skipped += 1;
+        }
+
+        // Bu odam ishlandi — navbat shu yerdan davom etadi.
+        lastId = citizen._id;
+
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          {
+            $set: {
+              stage: `Kadastrsiz — ${processed}/${total} (${added} kiritildi)`,
+              membersAdded: added,
+              membersFailed: failed,
+              membersSkipped: skipped,
+              matchedBySurname: bySurnameCount,
+              matchedRandomly: randomlyCount,
+              heartbeatAt: new Date(),
+            },
+          },
+        );
+      }
+    }
+
+    if (outOfHomes) {
+      pushRunLog(run._id, {
+        level: "info",
+        message:
+          "Bo'sh joyi bor xonadon qolmadi — jarayon to'xtatildi. " +
+          `Platformada har xonadonga ${UNCADASTRED_HOME_LIMIT} tagacha a'zo sig'adi.`,
+      });
+    }
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "done",
+          stage: outOfHomes
+            ? `Xonadonlar to'ldi — ${added} ta kiritildi`
+            : `Tugadi — ${added} ta kiritildi (${bySurnameCount} familiya, ${randomlyCount} random)`,
+          membersAdded: added,
+          membersFailed: failed,
+          membersSkipped: skipped,
+          matchedBySurname: bySurnameCount,
+          matchedRandomly: randomlyCount,
+          finishedAt: new Date(),
+        },
+      },
+    );
+
+    pushRunLog(run._id, {
+      level: "info",
+      message:
+        `Kadastrsiz rejim tugadi: ${added} kiritildi ` +
+        `(${bySurnameCount} familiya bo'yicha, ${randomlyCount} random), ` +
+        `${exists} allaqachon bor, ${failed} xato, ${skipped} o'tkazildi`,
+    });
+  } catch (err) {
+    // Token eskirgan — xato emas, pauza (yangilab davom ettiriladi).
+    if (err instanceof TokenExpiredError) {
+      await pauseRunForExpiredToken(run);
+      return;
+    }
+
+    console.error("[Kadastrsiz] xatolik:", err);
+
+    await RegistrationRun.updateOne(
+      { _id: run._id },
+      {
+        $set: {
+          status: "error",
+          error: err.message,
+          stage: "Xatolik",
+          finishedAt: new Date(),
+        },
+      },
+    ).catch(() => {});
 
     pushRunLog(run._id, {
       level: "error",

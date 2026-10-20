@@ -139,6 +139,28 @@ const registrationRunSchema = new Schema(
     // `citizens` emas, `FamilyMember`. Telefon yo'q bo'lsa
     // avto-generate qilinadi.
     extraMode: { type: Boolean, default: false },
+
+    // --- Kadastrsiz rejim ---
+    //
+    // Manba — `UncadastredCitizen` (kadastrsiz baza), ya'ni odamni
+    // kadastri bo'yicha xonadonga moslash IMKONI YO'Q. Buning
+    // o'rniga taqsimlash serverda hisoblanadi:
+    //   1) avval FAMILIYA bo'yicha mos xonadon qidiriladi
+    //      (xonadon egasi bilan bir oila bo'lsa — eng to'g'ri joy);
+    //   2) mos xonadon topilmasa, bo'sh joyi bor xonadonga RANDOM
+    //      taqsimlanadi.
+    uncadastredMode: { type: Boolean, default: false },
+
+    // Qaysi MFY guruhidan ishlanadi (`UncadastredGroup._id`).
+    // Modalda tanlanadi.
+    uncadastredGroupId: { type: Schema.Types.ObjectId, ref: "UncadastredGroup" },
+    uncadastredGroupName: { type: String },
+
+    // Taqsimlash natijasi — panelda alohida ko'rsatiladi: xodim
+    // nechta odam HAQIQATAN o'z oilasiga, nechtasi random joyga
+    // tushganini bilishi kerak.
+    matchedBySurname: { type: Number, default: 0 },
+    matchedRandomly: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

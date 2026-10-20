@@ -7,6 +7,7 @@ import authRoutes from "./src/routes/auth.routes.js";
 import mfyTokenRoutes from "./src/routes/mfy-token.routes.js";
 import userRoutes from "./src/routes/user.routes.js";
 import citizenRoutes from "./src/routes/citizen.routes.js";
+import uncadastredRoutes from "./src/routes/uncadastred.routes.js";
 import dashboardRoutes from "./src/routes/dashboard.routes.js";
 import { authContext } from "./src/middlewares/auth-context.middleware.js";
 
@@ -106,6 +107,7 @@ app.use("/api", authRoutes);
 app.use("/api", mfyTokenRoutes);
 app.use("/api", userRoutes);
 app.use("/api", citizenRoutes);
+app.use("/api", uncadastredRoutes);
 app.use("/api", dashboardRoutes);
 
 app.listen(PORT, () => {

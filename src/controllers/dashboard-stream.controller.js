@@ -101,6 +101,15 @@ export const streamDashboard = async (req, res) => {
         randomTarget: run.randomTarget ?? 0,
         randomAdded: run.randomAdded ?? 0,
         randomAddedTotal,
+        // --- Kadastrsiz rejim ---
+        uncadastredMode: run.uncadastredMode ?? false,
+        uncadastredGroupName: run.uncadastredGroupName ?? null,
+        matchedBySurname: run.matchedBySurname ?? 0,
+        matchedRandomly: run.matchedRandomly ?? 0,
+        membersTotal: run.membersTotal ?? 0,
+        membersAdded: run.membersAdded ?? 0,
+        membersFailed: run.membersFailed ?? 0,
+        membersSkipped: run.membersSkipped ?? 0,
       },
       stats,
       currentHome: currentHome

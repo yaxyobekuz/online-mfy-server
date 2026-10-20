@@ -4,6 +4,8 @@ import Citizen from "../models/Citizen.js";
 import Home from "../models/Home.js";
 import RegistrationRun from "../models/RegistrationRun.js";
 import FamilyMember from "../models/FamilyMember.js";
+import UncadastredCitizen from "../models/UncadastredCitizen.js";
+import UncadastredGroup from "../models/UncadastredGroup.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import User from "../models/User.js";
@@ -118,6 +120,12 @@ export const pickVisibleRun = async (uid) => {
     userUid: uid,
     randomMode: { $ne: true },
     extraMode: { $ne: true },
+    // Kadastrsiz yurish ham ASOSIY emas: unda xonadon navbati yo'q
+    // va odamlar familiya bo'yicha taqsimlanadi. Uni "kadastr
+    // yurishi" deb olsak, tugagandan keyin panel abadiy kadastrsiz
+    // ko'rinishida qotib qolardi va haqiqiy kadastr natijasi
+    // (minglab kiritilgan odam) ko'rinmay ketardi.
+    uncadastredMode: { $ne: true },
   })
     .sort({ createdAt: -1 })
     .lean();
@@ -147,6 +155,11 @@ export const resolveMahalla = async (user) => {
   const previous = await RegistrationRun.findOne({
     userUid: user.uid,
     randomMode: { $ne: true },
+    // Kadastrsiz yurish ham chetlab o'tiladi: uning mahalla kaliti
+    // guruh nomidan kelib chiqqan bo'lishi mumkin, u esa
+    // platformadagi haqiqiy MFY dan farq qilsa, kadastr yurishi
+    // boshqa mahallaga tegishlidek ko'rinardi.
+    uncadastredMode: { $ne: true },
   })
     .sort({ createdAt: -1 })
     .select("mahallaKey mahallaName")
@@ -306,9 +319,18 @@ export const resolveScope = async (run, userUid) => {
   // tanlov), va bu sonlar kadastr manzarasini buzardi. Random
   // rejimda QO'SHILGAN odamlar pastda alohida, additiv tarzda
   // qo'shiladi.
+  //
+  // KADASTRSIZ yurishlar ham bu yerga kirmaydi — random bilan bir
+  // xil sabab: ularda xonadon navbati yo'q (odam familiya bo'yicha
+  // taqsimlanadi), ya'ni "jami aholi", "jami xonadon" va
+  // "kutilmoqda" sonlari kadastr bazasidan hisoblanadi va
+  // kadastrsiz urinishlar ularga sig'maydi. Ular mahalla kalitini
+  // kadastr yurish bilan BO'LISHADI, shuning uchun ataylab
+  // chiqarib tashlanadi.
   const runIds = await RegistrationRun.distinct("_id", {
     userUid,
     mahallaKey: run.mahallaKey,
+    uncadastredMode: { $ne: true },
   });
 
   // Shu MFY ning random yurishlari (ularda mahallaKey username
@@ -618,6 +640,17 @@ export const getDashboard = async (req, res) => {
             randomAdded: run.randomAdded ?? 0,
             // Barcha random yurishlar bo'yicha jami.
             randomAddedTotal,
+            // --- Kadastrsiz rejim ---
+            uncadastredMode: run.uncadastredMode ?? false,
+            uncadastredGroupName: run.uncadastredGroupName ?? null,
+            // Taqsimlash manzarasi: nechtasi o'z oilasiga (familiya
+            // bo'yicha), nechtasi tasodifiy xonadonga tushdi.
+            matchedBySurname: run.matchedBySurname ?? 0,
+            matchedRandomly: run.matchedRandomly ?? 0,
+            membersTotal: run.membersTotal ?? 0,
+            membersAdded: run.membersAdded ?? 0,
+            membersFailed: run.membersFailed ?? 0,
+            membersSkipped: run.membersSkipped ?? 0,
           }
         : null,
       stats,
@@ -1400,6 +1433,106 @@ export const extraStart = async (req, res) => {
 
     return res.status(202).json({
       message: `Qo'shimcha a'zolar rejimi boshlandi — ${count} ta a'zo`,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Server xatoligi" });
+  }
+};
+
+/**
+ * POST /api/dashboard/uncadastred-start  { groupId }
+ *
+ * "Kadastrsiz boshlash" rejimi: KADASTRSIZ bazadagi (tanlangan MFY
+ * guruhi) fuqarolarni platformaga oila a'zosi sifatida qo'shadi.
+ *
+ * Taqsimlash SERVERDA hisoblanadi (ishchida):
+ *   1. avval FAMILIYA bo'yicha mos xonadon qidiriladi — xonadon
+ *      egasi bilan bir oila bo'lsa, odam aynan o'sha joyga tushadi;
+ *   2. moslash imkoni bo'lmasa, bo'sh joyi bor xonadonga RANDOM
+ *      taqsimlanadi.
+ */
+export const uncadastredStart = async (req, res) => {
+  const user = requireUser(res);
+  if (!user) return;
+
+  const groupId = req.body?.groupId ? String(req.body.groupId) : null;
+
+  if (!groupId || !mongoose.isValidObjectId(groupId)) {
+    return res.status(400).json({ message: "MFY guruhi tanlanmadi" });
+  }
+
+  try {
+    const token = getRequestToken();
+
+    // Allaqachon ishlayotgan yurish bo'lmasin: ikkita jarayon bir
+    // vaqtda ketsa tashqi API limitini bo'lishib olib, ikkalasi ham
+    // sekinlashardi.
+    const running = await RegistrationRun.find({
+      userUid: user.uid,
+      status: { $in: ["pending", "preparing", "running"] },
+    }).limit(10);
+
+    if (running.find((run) => isRunActiveAnywhere(run))) {
+      return res
+        .status(200)
+        .json({ message: "Avval joriy jarayonni to'xtating" });
+    }
+
+    const group = await UncadastredGroup.findById(groupId).lean();
+    if (!group) {
+      return res.status(404).json({ message: "MFY guruhi topilmadi" });
+    }
+
+    const count = await UncadastredCitizen.countDocuments({
+      groupId: group._id,
+    });
+
+    if (!count) {
+      return res.status(404).json({
+        message: `"${group.name}" guruhida yozuv yo'q — avval "Kadastrsiz ma'lumotlar" bo'limida Excel yuklang`,
+      });
+    }
+
+    // Guruhdagi odamlarning qanchasida JSHSHIR bor: JSHSHIR'siz odam
+    // platformaga kirmaydi, shuning uchun xodim buni DARHOL bilishi
+    // kerak (aks holda "nega 1698 dan 1688 tasi kirdi?" degan savol
+    // tug'ilardi).
+    const withPinfl = await UncadastredCitizen.countDocuments({
+      groupId: group._id,
+      pinfl: { $nin: [null, ""] },
+    });
+
+    const mahalla = await resolveMahalla(user);
+
+    const run = await RegistrationRun.create({
+      // Mahalla kaliti: guruhning o'zi MFY ni belgilaydi, lekin
+      // panel va statistika mavjud mahalla bo'yicha guruhlanadi —
+      // shuning uchun aniqlangani ustun, bo'lmasa guruhnikisi.
+      mahallaKey: mahalla?.key ?? group.mahallaKey,
+      mahallaName: mahalla?.name ?? group.name,
+      status: "pending",
+      control: "run",
+      userUid: user.uid,
+      token,
+      oblId: user.oblId,
+      areaId: user.areaId,
+      districtId: user.districtId,
+      uncadastredMode: true,
+      uncadastredGroupId: group._id,
+      uncadastredGroupName: group.name,
+      membersTotal: count,
+      // Taqiqlangan ko'chalar surati — random taqsimlashda shu
+      // ko'chalarga odam qo'yilmaydi (random rejim bilan bir xil
+      // sozlama).
+      randomExcludedStreetIds: (user.excludedStreetIds ?? []).map(String),
+    });
+
+    runRegistration(user, run, token);
+
+    return res.status(202).json({
+      message:
+        `"${group.name}" — kadastrsiz rejim boshlandi: ${count} ta yozuv` +
+        (withPinfl < count ? `, ${count - withPinfl} tasida JSHSHIR yo'q` : ""),
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Server xatoligi" });
