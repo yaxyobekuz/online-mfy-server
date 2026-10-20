@@ -352,6 +352,48 @@ const rateLimited = (run, fn) =>
 // Tashqi API chaqiruvlari
 // ---------------------------------------------------------------
 
+/**
+ * Yurishning "taqiqlangan ko'chalar" surati.
+ *
+ * Sozlamada belgilanmagan ko'chaga HECH QAYSI rejimda fuqaro
+ * kiritilmaydi: oddiy (kadastr), kadastrsiz, random va qo'shimcha —
+ * hammasi shu ro'yxatga bo'ysunadi. Avval cheklov faqat random
+ * rejimda ishlardi va xodim boshqa rejimni ishga tushirganda
+ * "номаълум" kabi texnik ko'chalarga ham ma'lumot kirib ketardi.
+ *
+ * Surat YURISHDA saqlanadi (`randomExcludedStreetIds`), sozlamadan
+ * to'g'ridan-to'g'ri o'qilmaydi: ish ketayotganda sozlama
+ * o'zgartirilsa, allaqachon ishlangan xonadonlar bilan ziddiyat
+ * chiqardi.
+ *
+ * Eski yurishlarda bu maydon bo'sh bo'lishi mumkin (cheklov hali
+ * yo'q edi) — bunday holatda hech narsa taqiqlanmaydi.
+ */
+const excludedStreetsOf = (run) =>
+  new Set((run?.randomExcludedStreetIds ?? []).map((id) => String(id)));
+
+/**
+ * Ko'chalar ro'yxatidan taqiqlanganlarini olib tashlaydi va
+ * nechtasi chetlab o'tilganini jurnalga yozadi.
+ */
+const allowedStreets = (streets, excluded, run) => {
+  if (!excluded.size) return streets;
+
+  const allowed = streets.filter(
+    (street) => !excluded.has(String(street.id)),
+  );
+
+  const skipped = streets.length - allowed.length;
+  if (skipped) {
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Sozlamaga ko'ra ${skipped} ta ko'cha chetlab o'tildi (${allowed.length} ta ko'cha bilan ishlanadi)`,
+    });
+  }
+
+  return allowed;
+};
+
 const fetchStreets = (user, run) =>
   rateLimited(run, () =>
     api.get("/api/v1/survey_homes/cache/street", {
@@ -1333,6 +1375,25 @@ const processHome = async (
 
   const empty = { added: 0, failed: 0, skipped: 0, candidates: 0 };
 
+  // --- Taqiqlangan ko'cha ---
+  //
+  // Oxirgi himoya: navbat `syncResumeQueue` da tozalanadi, lekin
+  // eski yurishlarda (sozlama kiritilishidan oldin tuzilgan navbat)
+  // taqiqlangan ko'chadagi xonadon qolib ketgan bo'lishi mumkin.
+  // Bu yerda tekshirish arzon va ishonchli: tashqi API ga so'rov
+  // yuborilgunga QADAR to'xtatiladi.
+  if (excludedStreetsOf(run).has(String(homeRow.streetId))) {
+    const reason = "Ko'cha sozlamalarda taqiqlangan";
+    await finishHome({ status: "skipped", reason });
+
+    pushRunLog(run._id, {
+      level: "skip",
+      message: `${homeRow.streetName ?? homeRow.streetId} — ${reason}`,
+    });
+
+    return { homeStatus: "skipped", ...empty };
+  }
+
   // --- survey_uuid va egasining JSHSHIR'i ---
   // Ikkalasi ham a'zo qo'shish uchun majburiy. Ro'yxat endpointi
   // survey_uuid'ni bermaydi — xonadon formasidan olinadi.
@@ -1924,19 +1985,37 @@ const prepareQueue = async (user, run) => {
     { $set: { stage: "Ko'chalar yuklanmoqda" } },
   );
 
-  const streets = await fetchStreets(user, run);
+  const allStreets = await fetchStreets(user, run);
 
   // Ko'chalarni mahalliy nusxaga ham yozib qo'yamiz — boshqa
   // sahifalar shu ro'yxatdan foydalanadi.
-  if (streets.length) {
+  //
+  // Diqqat: bu yerda TAQIQLANGANLARI ham saqlanadi. Mahalliy nusxa
+  // "platformada qanday ko'chalar bor" degan savolga javob beradi
+  // (sozlamalar oynasi shundan ro'yxat tuzadi), ya'ni unda hamma
+  // ko'cha turishi kerak. Taqiqlanganlari pastda, navbat tuzishdan
+  // oldin chiqarib tashlanadi.
+  if (allStreets.length) {
     await Street.bulkWrite(
-      streets.map((street) => ({
+      allStreets.map((street) => ({
         updateOne: {
           filter: { userUid: user.uid, streetId: String(street.id) },
           update: { $set: { name: street.name } },
           upsert: true,
         },
       })),
+    );
+  }
+
+  // Sozlamada belgilanmagan ko'chalar — bu rejimda ham chetlab
+  // o'tiladi (avval faqat random rejimda shunday edi).
+  const streets = allowedStreets(allStreets, excludedStreetsOf(run), run);
+
+  if (!streets.length) {
+    throw new Error(
+      allStreets.length
+        ? "Ruxsat etilgan ko'cha yo'q — sozlamalarda kamida bitta ko'chani belgilang"
+        : "Ko'chalar topilmadi",
     );
   }
 
@@ -2082,9 +2161,7 @@ const runRandomWorker = async (user, runDoc) => {
 
     // Sozlamalarda taqiqlangan ko'chalar surati: keyingi xonadonga
     // o'tishda bu ko'chalardagi xonadonlarga qo'shilmaymiz.
-    const excludedStreetIds = new Set(
-      (fresh.randomExcludedStreetIds ?? []).map((id) => String(id)),
-    );
+    const excludedStreetIds = excludedStreetsOf(fresh);
 
     if (!homeId || !streetId || !surveyUuid) {
       throw new Error("Xonadon ma'lumotlari to'liq emas — homeId, streetId yoki surveyUuid yo'q");
@@ -2699,16 +2776,46 @@ const prepareExtraQueue = async (user, run) => {
   // kadastr umuman kerak emas — street_id + survey_uuid + owner_pinfl yetadi.
   // homeId esa har doim bor va xonadonning asl kimligi. Shuning uchun kadastr
   // yo'qligi yuklashni to'xtatmasligi kerak.
-  const members = await FamilyMember.find({
+  const allMembers = await FamilyMember.find({
     userUid: user.uid,
     isOwner: { $ne: true },
     homeId: { $nin: [null, ""] },
   }).lean();
 
-  if (!members.length) {
+  if (!allMembers.length) {
     throw new Error(
       "Qo'shimcha a'zolar topilmadi — avval \"Qo'shimcha a'zolar\" bo'limida yuklang",
     );
+  }
+
+  // Sozlamada belgilanmagan ko'chadagi a'zolar chetlab o'tiladi.
+  //
+  // Bu rejimda ko'cha platformadan emas, YUKLANGAN a'zo yozuvidan
+  // olinadi (`FamilyMember.streetId`), shuning uchun filtr ko'chalar
+  // ro'yxatiga emas, a'zolarning o'ziga qo'llanadi.
+  //
+  // Ko'chasi noma'lum a'zo (streetId bo'sh) QOLDIRILADI: uni
+  // taqiqlangan deb bo'lmaydi — qaysi ko'chada ekani ma'lum emas,
+  // va platformaga yuborishda ko'cha baribir xonadondan olinadi.
+  const excluded = excludedStreetsOf(run);
+
+  const members = excluded.size
+    ? allMembers.filter(
+        (m) => !m.streetId || !excluded.has(String(m.streetId)),
+      )
+    : allMembers;
+
+  if (!members.length) {
+    throw new Error(
+      "Ruxsat etilgan ko'chada qo'shimcha a'zo topilmadi — sozlamalardagi ko'chalarni tekshiring",
+    );
+  }
+
+  if (members.length < allMembers.length) {
+    pushRunLog(run._id, {
+      level: "info",
+      message: `Sozlamaga ko'ra ${allMembers.length - members.length} ta a'zo chetlab o'tildi (taqiqlangan ko'chalar)`,
+    });
   }
 
   // HomeId bo'yicha guruhlash — har xonadon bitta navbat yozuvi.
@@ -2951,6 +3058,29 @@ const runExtraWorker = async (user, runDoc) => {
       }).sort({ queueIndex: 1 });
 
       if (!homeRow) break;
+
+      // Taqiqlangan ko'cha — oxirgi himoya (navbat `prepareExtraQueue`
+      // da filtrlanadi, lekin eski yurishda qolgan bo'lishi mumkin).
+      if (excludedStreetsOf(run).has(String(homeRow.streetId))) {
+        await RegistrationHome.updateOne(
+          { _id: homeRow._id },
+          {
+            $set: {
+              status: "skipped",
+              reason: "Ko'cha sozlamalarda taqiqlangan",
+              finishedAt: new Date(),
+            },
+          },
+        );
+
+        pushRunLog(run._id, {
+          level: "skip",
+          message: `${homeRow.streetName ?? homeRow.streetId} — ko'cha sozlamalarda taqiqlangan`,
+        });
+
+        await recountRun(run._id);
+        continue;
+      }
 
       await RegistrationHome.updateOne(
         { _id: homeRow._id },
@@ -3370,9 +3500,7 @@ const buildHomeIndex = async (user, run, excludedStreetIds) => {
 
   // Sozlamalarda taqiqlangan ko'chalar ("номаълум" kabi texnik
   // ko'chalar) — bu rejimda ham chetlab o'tiladi.
-  const streets = allStreets.filter(
-    (street) => !excludedStreetIds.has(String(street.id)),
-  );
+  const streets = allowedStreets(allStreets, excludedStreetIds, run);
 
   if (!streets.length) {
     throw new Error(
@@ -3894,11 +4022,11 @@ const runUncadastredWorker = async (user, runDoc) => {
     });
 
     // --- Xonadonlar indeksi ---
-    const excludedStreetIds = new Set(
-      (fresh.randomExcludedStreetIds ?? []).map((id) => String(id)),
+    const homeIndex = await buildHomeIndex(
+      user,
+      run,
+      excludedStreetsOf(fresh),
     );
-
-    const homeIndex = await buildHomeIndex(user, run, excludedStreetIds);
 
     if (homeIndex.interrupted) {
       const paused = homeIndex.interrupted === "pause";

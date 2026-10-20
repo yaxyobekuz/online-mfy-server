@@ -700,6 +700,35 @@ export const getDashboard = async (req, res) => {
  * bo'lmaydi.
  */
 const syncResumeQueue = async (user, run) => {
+  // Sozlamada belgilanmagan ko'chalar — ularga ma'lumot kiritilmaydi.
+  const excluded = new Set((user.excludedStreetIds ?? []).map(String));
+
+  // Taqiqlangan ko'chadagi, HALI ISHLANMAGAN xonadonlarni navbatdan
+  // olib tashlaymiz.
+  //
+  // Nega kerak: bu rejim yangi yurish ochmaydi — mavjudini davom
+  // ettiradi. Navbat esa bir marta, yurish boshida tuzilgan. Agar
+  // xodim keyin ko'chani o'chirsa, o'sha ko'chadagi xonadonlar
+  // navbatda `pending` bo'lib qolaverardi va "Boshlash" ularni
+  // baribir ishlab ketardi — ya'ni sozlama bu rejimda ishlamasdi.
+  //
+  // ALLAQACHON ISHLANGANLARIGA tegilmaydi: ular tarix, ularni
+  // o'chirish hisobotdagi sonlarni buzardi.
+  if (excluded.size) {
+    const removed = await RegistrationHome.deleteMany({
+      runId: run._id,
+      streetId: { $in: [...excluded] },
+      status: { $in: ["pending", "processing"] },
+    });
+
+    if (removed.deletedCount) {
+      await RegistrationRun.updateOne(
+        { _id: run._id },
+        { $inc: { homesTotal: -removed.deletedCount } },
+      );
+    }
+  }
+
   const queueHomes = await RegistrationHome.find(
     { runId: run._id },
     "cadasterNumber status queueIndex",
@@ -730,6 +759,10 @@ const syncResumeQueue = async (user, run) => {
   for (const home of scanned) {
     const key = cadasterKey(home.cadasterNumber);
     if (!key || queuedKeys.has(key) || seen.has(key)) continue;
+
+    // Taqiqlangan ko'chadagi xonadon navbatga umuman qo'shilmaydi.
+    if (excluded.has(String(home.streetId))) continue;
+
     seen.add(key);
 
     inserts.push({
@@ -807,7 +840,16 @@ const syncResumeQueue = async (user, run) => {
 
       if (toRequeue.length) {
         const result = await RegistrationHome.updateMany(
-          { _id: { $in: toRequeue }, runId: run._id },
+          {
+            _id: { $in: toRequeue },
+            runId: run._id,
+            // Taqiqlangan ko'chadagi xonadon qayta navbatga
+            // OLINMAYDI: u tugagan bo'lsa ham, sozlama o'zgargach
+            // unga boshqa ma'lumot kiritilmasligi kerak.
+            ...(excluded.size
+              ? { streetId: { $nin: [...excluded] } }
+              : {}),
+          },
           {
             $set: { status: "pending" },
             $unset: { reason: "", finishedAt: "", durationMs: "" },
@@ -819,9 +861,12 @@ const syncResumeQueue = async (user, run) => {
   }
 
   if (inserts.length || requeuedNew) {
+    // Sonni HAQIQIY sanoqdan olamiz: yuqorida taqiqlangan
+    // ko'chadagi xonadonlar o'chirilgan bo'lishi mumkin, ya'ni
+    // `queueHomes.length` allaqachon eskirgan.
     await RegistrationRun.updateOne(
       { _id: run._id },
-      { $set: { homesTotal: queueHomes.length + inserts.length } },
+      { $set: { homesTotal: await RegistrationHome.countDocuments({ runId: run._id }) } },
     );
   }
 
@@ -980,6 +1025,16 @@ export const controlDashboard = async (req, res) => {
         resumable.oblId = user.oblId;
         resumable.areaId = user.areaId;
         resumable.districtId = user.districtId;
+        // Taqiqlangan ko'chalar surati HAR "Boshlash" da yangilanadi.
+        //
+        // Nega yaratishda emas: bu rejim yangi yurish ochmaydi, shu
+        // mahalladagi mavjud yurishni DAVOM ETTIRADI. Agar surat
+        // faqat bir marta — yurish tug'ilganda — yozilsa, keyin
+        // sozlamada ko'cha o'chirilgani hech qachon kuchga
+        // kirmasdi: eski yurish eski surati bilan ishlayverardi.
+        resumable.randomExcludedStreetIds = (user.excludedStreetIds ?? []).map(
+          String,
+        );
         await resumable.save();
 
         runRegistration(user, resumable, resumable.token);
@@ -1003,6 +1058,9 @@ export const controlDashboard = async (req, res) => {
         oblId: user.oblId,
         areaId: user.areaId,
         districtId: user.districtId,
+        // Sozlamada belgilanmagan ko'chalar bu rejimda ham chetlab
+        // o'tiladi (avval faqat random rejimda shunday edi).
+        randomExcludedStreetIds: (user.excludedStreetIds ?? []).map(String),
       });
 
       runRegistration(user, run, token);
@@ -1365,8 +1423,23 @@ export const updateStreetSettings = async (req, res) => {
       { $set: { excludedStreetIds, ...(limitGiven ? { autoStopAfter } : {}) } },
     );
 
+    // Ketayotgan yurish O'Z SURATI bilan ishlaydi (yurish
+    // boshlanganda saqlangan ro'yxat) — aks holda yarmida
+    // o'zgartirilgan sozlama allaqachon ishlangan xonadonlar bilan
+    // ziddiyatga tushardi. Yangi ro'yxat keyingi "Boshlash" dan
+    // kuchga kiradi, shuning uchun xodimga shuni AYTAMIZ: aks holda
+    // u sozlama ishlamayapti deb o'ylardi.
+    const active = (
+      await RegistrationRun.find({
+        userUid: user.uid,
+        status: { $in: ["pending", "preparing", "running"] },
+      }).limit(10)
+    ).some((run) => isRunActiveAnywhere(run));
+
     return res.status(200).json({
-      message: "Sozlamalar saqlandi",
+      message: active
+        ? "Sozlamalar saqlandi — ketayotgan jarayonga keyingi \"Boshlash\" dan kuchga kiradi"
+        : "Sozlamalar saqlandi",
       excludedStreetIds,
       autoStopAfter: limitGiven ? autoStopAfter : (user.autoStopAfter ?? 0),
     });
@@ -1427,6 +1500,9 @@ export const extraStart = async (req, res) => {
       areaId: user.areaId,
       districtId: user.districtId,
       extraMode: true,
+      // Taqiqlangan ko'chalar — bu rejimga ham tegishli: yuklangan
+      // a'zolar orasidan shu ko'chadagilari chetlab o'tiladi.
+      randomExcludedStreetIds: (user.excludedStreetIds ?? []).map(String),
     });
 
     runRegistration(user, run, token);

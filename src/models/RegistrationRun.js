@@ -128,9 +128,21 @@ const registrationRunSchema = new Schema(
     randomStreetId: { type: String },
     randomSurveyUuid: { type: String },
     randomOwnerPinfl: { type: String },
+
+    // --- Taqiqlangan ko'chalar (BARCHA rejimga tegishli) ---
+    //
     // Yurish boshlanganda saqlangan "taqiqlangan ko'chalar" surati.
     // Sozlama keyin o'zgarsa ham, ketayotgan yurish o'z suratiga
-    // bo'ysunadi (worker har xonadon o'tishda shu ro'yxatni o'qiydi).
+    // bo'ysunadi — aks holda yarmida o'zgartirilgan sozlama allaqachon
+    // ishlangan xonadonlar bilan ziddiyatga tushardi.
+    //
+    // Nomi tarixiy ("random..."): avval bu cheklov FAQAT random
+    // rejimda ishlardi. Endi u ODDIY (kadastr), KADASTRSIZ va
+    // QO'SHIMCHA rejimlarga ham tegishli — xodim sozlamada
+    // belgilamagan ko'chaga hech qaysi rejimda fuqaro kiritilmaydi.
+    // Maydon nomi ataylab o'zgartirilmadi: bazada allaqachon shu nom
+    // bilan yozuvlar bor va ularni ko'chirish ortiqcha tavakkal
+    // bo'lardi.
     randomExcludedStreetIds: { type: [String], default: [] },
 
     // --- Qo'shimcha a'zolar rejimi ---
