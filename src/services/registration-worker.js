@@ -4127,12 +4127,42 @@ const postUncadastredMember = async (user, run, home, citizen, via) => {
       const reason = describeError(err);
       const reasonCode = reasonCodeOf(reason);
 
-      // Xonadon to'lgan bo'lsa — bu odamning aybi emas. Xonadonni
-      // to'la deb belgilaymiz va odam KEYINGI xonadonda qayta
-      // urinadi (chaqiruvchi "home_full" dan shuni biladi). Yozuv
-      // YARATILMAYDI: aks holda bitta odam uchun bir nechta "xato"
-      // qatori paydo bo'lib, hisobot buzilardi.
-      if (/зиёд|ziyod|оила\s+аъзоси\s+киритиш|оила\s+азоси\s+киритиш/i.test(reason)) {
+      // ODAM DARAJASIDAGI QAT'IY RAD — boshqa xonadonda ro'yxatda,
+      // allaqachon mavjud yoki o'zgarmas sabab (vafot etgan va h.k.).
+      // Bu fuqaroni BOSHQA xonadonga ko'chirib ham foyda yo'q: rad aniq,
+      // KEYINGI FUQAROGA o'tamiz.
+      //
+      // Bu tekshiruv xonadon-to'laligidan OLDIN turishi SHART. Avval
+      // teskari edi va JIDDIY xatoga olib kelardi: rad xabari ichida
+      // tasodifan "ziyod" bo'lsa (masalan hokim yordamchisi ismi
+      // "ABDUNABIYEV MIRZIYOD" — "mirZIYOD" ichida "ziyod"), xato
+      // noto'g'ri "xonadon to'ldi" deb tasniflanib, bitta odam (allaqachon
+      // boshqa xonadonda bor) uchun o'nlab bo'sh xonadonda behuda
+      // urinilardi — natijada jarayon "Xonadonlar to'ldi" deb erta
+      // to'xtardi.
+      const personVerdict =
+        reasonCode === "boshqa_xonadon_egasi" ||
+        reasonCode === "boshqa_xonadon_azosi" ||
+        reasonCode === "allaqachon_mavjud" ||
+        PERMANENT_REASON_CODES.includes(reasonCode);
+
+      // Xonadon CHINDAN to'lgan (oila a'zolari soni chegaradan oshgan).
+      // "зиёд"/"ziyod" so'zi ismlarda va boshqa xabarlarda ham uchraydi,
+      // shuning uchun bare "зиёд" emas, ANIQ naqsh talab qilinadi:
+      // "N тадан зиёд ..." yoki "оила аъзоси киритиб бўлмайди".
+      const homeFull =
+        !personVerdict &&
+        (/\d+\s*тадан\s+зи[её]д/i.test(reason) ||
+          /оила\s+а[ъʼ'`]?[зс]оси\s+(киритиб\s+бўлмайди|киритиш\s+мумкин\s+эмас)/i.test(
+            reason,
+          ));
+
+      // Xonadon to'lgan bo'lsa — bu odamning aybi emas. Xonadonni to'la
+      // deb belgilaymiz va odam KEYINGI xonadonda qayta urinadi
+      // (chaqiruvchi "home_full" dan shuni biladi). Yozuv YARATILMAYDI:
+      // aks holda bitta odam uchun bir nechta "xato" qatori paydo
+      // bo'lib, hisobot buzilardi.
+      if (homeFull) {
         home.memberCount = UNCADASTRED_HOME_LIMIT;
 
         pushRunLog(run._id, {
@@ -4506,9 +4536,6 @@ const runUncadastredWorker = async (user, runDoc) => {
               `Bo'sh joyli xonadon topilmadi — kursor ${randomCursor.index}/${total}, ` +
               `o'qilgan ${loaded}, yaroqsiz ${unusable}, bo'sh joyli ${withRoom}`,
           });
-          console.log(
-            `[Kadastrsiz][DIAG] outOfHomes: cursor=${randomCursor.index}/${total} loaded=${loaded} unusable=${unusable} withRoom=${withRoom} processed=${processed}`,
-          );
 
           outOfHomes = true;
           break outer;
