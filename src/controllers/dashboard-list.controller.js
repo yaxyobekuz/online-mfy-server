@@ -24,6 +24,11 @@ import {
 
 const PAGE_SIZE = 50;
 
+// Jonli kuzatuvdagi "Ba'tafsil qidiruv" bir sahifada nechta
+// yozuv ko'rsatadi. Jonli ro'yxat (SSE) oxirgi 40 tani beradi,
+// qidiruv esa shundan eskiroqlariga ham yetadi.
+const FEED_PAGE_SIZE = 40;
+
 // Kartochka kalitlari — client'dagi URL ham shularni ishlatadi.
 export const LIST_KINDS = {
   total: "Jami aholi",
@@ -259,6 +264,82 @@ export const getDashboardList = async (req, res) => {
       pageSize: PAGE_SIZE,
       totalPages,
       items: filtered.slice(start, start + PAGE_SIZE),
+    });
+  } catch {
+    return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+// Foydalanuvchi kiritgan matnni regex ichida xavfsiz ishlatish
+// uchun maxsus belgilarni qochiramiz — aks holda "(" kabi belgi
+// so'rovni buzardi.
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Jonli kuzatuv qidiruvida tanlanishi mumkin bo'lgan holatlar.
+// "movedAway" — status emas, alohida belgi (odam boshqa MFY da),
+// shuning uchun u filtrda `movedAway: true` ga aylanadi.
+const FEED_STATUSES = ["added", "exists", "failed", "skipped", "movedAway"];
+
+/**
+ * GET /api/dashboard/feed?search=&status=&page=
+ *
+ * Jonli kuzatuvning "Ba'tafsil qidiruv"i. Jonli ro'yxat faqat
+ * oxirgi 40 urinishni ko'rsatadi; bu endpoint esa shu foydalanuvchi
+ * bo'ylab (BARCHA yurishlar — eski natijalar ham) qidirib,
+ * sahifalab beradi.
+ *
+ * Qidiruv ism (manba va tasdiqlangan), JSHSHIR va kadastr bo'yicha
+ * ketadi. Natija eng yangisidan boshlab tartiblanadi.
+ */
+export const getDashboardFeed = async (req, res) => {
+  const user = getRequestUser();
+  if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
+
+  try {
+    const search = String(req.query.search ?? "").trim();
+    const status = String(req.query.status ?? "").trim();
+
+    // "pending" — hali urinilmagan, natijasi yo'q — jonli ro'yxatdagi
+    // kabi uni ko'rsatmaymiz.
+    const filter = { userUid: user.uid, status: { $ne: "pending" } };
+
+    if (status === "movedAway") {
+      filter.movedAway = true;
+    } else if (FEED_STATUSES.includes(status)) {
+      filter.status = status;
+    }
+
+    if (search) {
+      const rx = new RegExp(escapeRegex(search), "i");
+      filter.$or = [
+        { fullName: rx },
+        { verifiedFullName: rx },
+        { pinfl: rx },
+        { verifiedPinfl: rx },
+        { cadasterNumber: rx },
+      ];
+    }
+
+    const total = await RegistrationMember.countDocuments(filter);
+    const totalPages = Math.max(1, Math.ceil(total / FEED_PAGE_SIZE));
+    const page = Math.min(parsePage(req.query.page), totalPages);
+    const skip = (page - 1) * FEED_PAGE_SIZE;
+
+    const members = await RegistrationMember.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(FEED_PAGE_SIZE)
+      .select(
+        "fullName verifiedFullName pinfl verifiedPinfl status reason reasonCode durationMs createdAt",
+      )
+      .lean();
+
+    return res.status(200).json({
+      total,
+      page,
+      pageSize: FEED_PAGE_SIZE,
+      totalPages,
+      items: members.map(describeMember),
     });
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });

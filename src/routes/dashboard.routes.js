@@ -11,6 +11,7 @@ import {
 } from "../controllers/dashboard.controller.js";
 import {
   getDashboardList,
+  getDashboardFeed,
   getDashboardCitizen,
   getDashboardHome,
 } from "../controllers/dashboard-list.controller.js";
@@ -50,6 +51,7 @@ router.get("/dashboard/street-settings", getStreetSettings);
 router.put("/dashboard/street-settings", updateStreetSettings);
 router.get("/dashboard/members/:memberId", getDashboardMember);
 router.get("/dashboard/list", getDashboardList);
+router.get("/dashboard/feed", getDashboardFeed);
 router.get("/dashboard/citizens/:citizenId", getDashboardCitizen);
 router.get("/dashboard/homes/:homeId", getDashboardHome);
 router.get("/dashboard/report", getDashboardReport);
