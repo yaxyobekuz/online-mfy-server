@@ -3746,6 +3746,45 @@ const buildHomeIndex = async (user, run, excludedStreetIds) => {
  *
  * Qaytaradi: xonadon ishlatishga yaroqlimi (survey_uuid bormi).
  */
+// HTTP xatosi VAQTINCHALIKmi (qayta urinishga arziydimi)?
+//
+// 429 ni `withRateLimit` o'zi kutib qayta uradi, bu yerga kelmaydi.
+// 500/502/503/504 va timeout/tarmoq — platformaning lahzalik nosozligi,
+// qayta so'raganda ko'pincha hal bo'ladi. 400/404 esa DOIMIY (so'rov
+// yoki ma'lumot noto'g'ri) — qayta urinish befoyda.
+const isRetriableHttp = (err) => {
+  if (isNetworkError(err)) return true;
+  const s = err.response?.status;
+  return s === 500 || s === 502 || s === 503 || s === 504;
+};
+
+// Xonadon holatini o'qishda vaqtinchalik xatoni qayta uradi. AVVAL bu
+// yo'q edi: bitta 500/timeout xonadonni butunlay "yaroqsiz" (Infinity)
+// qilib qo'yardi va ko'p xonadon shunday belgilansa, bo'sh joylar
+// bor bo'lsa ham "Xonadonlar to'ldi" deb jarayon erta to'xtardi.
+const withHomeRetry = async (fn, run, label, tries = 4) => {
+  let last = null;
+
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isAuthError(err)) throw err; // yuqorida TokenExpiredError bo'ladi
+      last = err;
+
+      if (!isRetriableHttp(err) || attempt === tries) throw err;
+
+      pushRunLog(run._id, {
+        level: "wait",
+        message: `${label}: vaqtinchalik xato (${err.response?.status ?? err.code ?? "?"}) — ${attempt}/${tries}, qayta urinamiz`,
+      });
+      await pause(RETRY_PAUSE_MS * attempt);
+    }
+  }
+
+  throw last;
+};
+
 const loadHomeState = async (user, run, home, knownPinfls) => {
   if (home.memberCount !== null) return home.memberCount !== Infinity;
 
@@ -3753,13 +3792,23 @@ const loadHomeState = async (user, run, home, knownPinfls) => {
     let formData = null;
 
     try {
-      formData = await fetchHomeForm(user, home.homeId, run);
+      formData = await withHomeRetry(
+        () => fetchHomeForm(user, home.homeId, run),
+        run,
+        `Xonadon formasi (${home.homeNum ?? home.homeId})`,
+      );
     } catch (err) {
       // Token eskirgan — butun yurishning muammosi, yuqoriga uzatamiz.
       if (isAuthError(err)) throw new TokenExpiredError();
 
-      // Bu xonadon o'qilmadi — boshqa urinmaymiz, keyingisiga o'tamiz.
+      // Vaqtinchalik xatolardan keyin ham o'qilmadi — endi bu xonadon
+      // chindan ham muammoli. Yaroqsiz deb belgilaymiz va sababini
+      // jurnalga yozamiz (soxta "to'ldi" ni ajratish uchun).
       home.memberCount = Infinity;
+      pushRunLog(run._id, {
+        level: "error",
+        message: `Xonadon o'qilmadi (${home.homeNum ?? home.homeId}): ${describeError(err)} — chetlab o'tildi`,
+      });
       return false;
     }
 
@@ -3777,15 +3826,27 @@ const loadHomeState = async (user, run, home, knownPinfls) => {
     }
   }
 
-  const members = await fetchFamilyMembers(
-    user,
-    home.streetId,
-    home.surveyUuid,
-    run,
-  ).catch((err) => {
+  let members;
+  try {
+    members = await withHomeRetry(
+      () => fetchFamilyMembers(user, home.streetId, home.surveyUuid, run),
+      run,
+      `Oila a'zolari (${home.homeNum ?? home.homeId})`,
+    );
+  } catch (err) {
     if (isAuthError(err)) throw new TokenExpiredError();
-    return [];
-  });
+
+    // A'zolar ro'yxati o'qilmadi — nechta a'zo borligini bilmaymiz.
+    // AVVAL bu "0 a'zo" deb olinardi (bo'sh deb) va xonadon
+    // to'laligidan qat'i nazar ishlatilardi — platforma esa uni
+    // "ziyod" deb rad etardi. Endi yaroqsiz deb belgilaymiz.
+    home.memberCount = Infinity;
+    pushRunLog(run._id, {
+      level: "error",
+      message: `A'zolar o'qilmadi (${home.homeNum ?? home.homeId}): ${describeError(err)} — chetlab o'tildi`,
+    });
+    return false;
+  }
 
   home.memberCount = members.length;
 
@@ -4355,11 +4416,28 @@ const runUncadastredWorker = async (user, runDoc) => {
           continue;
         }
 
-        // Xonadon tanlaymiz. Tanlangan xonadon to'lib qolsa
-        // (platforma rad etsa), keyingisida qayta urinamiz.
+        // Xonadon tanlaymiz. Tanlangan xonadon TO'LIB qolsa (platforma
+        // "зиёд" desa), bu fuqaroni TASHLAMAYMIZ — boshqa bo'sh
+        // xonadonga qoldiramiz: to'lgan xonadonni belgilab, keyingisini
+        // sinaymiz.
+        //
+        // AVVAL atigi 3 marta urinardi: dastlabki 3 xonadon to'la
+        // chiqsa (platformada ko'p xonadon 15-20 a'zoga to'lgan), butun
+        // yurish "Xonadonlar to'ldi" deb to'xtardi — qolgan yuzlab bo'sh
+        // joyli xonadon umuman ko'rilmay qolardi. Endi haqiqiy bo'sh
+        // joy topilguncha yoki BARCHA xonadon ko'rib chiqilguncha davom
+        // etadi. Har to'la xonadon bir marta belgilanadi (keyingi
+        // fuqaroga qayta urinilmaydi), shuning uchun umumiy "to'ldi"
+        // so'rovlari soni yurish bo'yicha xonadonlar soni bilan
+        // cheklangan — tejamkor.
         let result = null;
 
-        for (let attempt = 0; attempt < 3; attempt += 1) {
+        // Xavfsizlik chegarasi: har bir urinish kursorni oldinga
+        // suradi yoki xonadonni to'la deb belgilaydi, shuning uchun
+        // xonadonlar sonidan ko'p aylanmaydi.
+        const maxTries = homeIndex.homes.length + 1;
+
+        for (let attempt = 0; attempt < maxTries; attempt += 1) {
           const picked = await pickHomeFor(
             user,
             run,
@@ -4369,6 +4447,8 @@ const runUncadastredWorker = async (user, runDoc) => {
             randomCursor,
           );
 
+          // null — chindan bo'sh joyli xonadon qolmadi (yoki boshqaruv
+          // o'zgardi). Pastda farqlanadi.
           if (!picked) break;
 
           result = await postUncadastredMember(
@@ -4387,11 +4467,49 @@ const runUncadastredWorker = async (user, runDoc) => {
             break;
           }
 
+          // Xonadon to'ldi — keyingisini sinaymiz (fuqaro navbatda
+          // qoladi, keyingi aylanishda boshqa xonadonga tushadi).
           result = null;
+
+          // Boshqaruv tugmasini ham tekshiramiz: ko'p to'la xonadon
+          // ketma-ket chiqsa, "To'xtatish" darhol sezilsin.
+          if ((await readControlCached(run)) !== "run") break;
         }
 
         if (result === null) {
-          // Bo'sh joyi bor xonadon qolmadi — davom etish befoyda.
+          // `pickHomeFor` null ni IKKI holatda qaytaradi: (1) boshqaruv
+          // "stop/pause" ga o'zgargan, (2) chindan bo'sh joyli xonadon
+          // qolmagan. Avvalgi kod ikkalasini ham "Xonadonlar to'ldi"
+          // deb yozardi — foydalanuvchi to'xtatsa ham "to'ldi" ko'rinardi.
+          // Shuning uchun avval boshqaruvni tekshiramiz.
+          if ((await readControl(run)) !== "run") continue outer;
+
+          // Diagnostika: nega bo'sh joy topilmadi — kursor qayerda
+          // to'xtagani va qancha xonadon yaroqsiz belgilangani.
+          const total = homeIndex.homes.length;
+          const unusable = homeIndex.homes.filter(
+            (h) => h.memberCount === Infinity,
+          ).length;
+          const withRoom = homeIndex.homes.filter(
+            (h) =>
+              h.memberCount !== null &&
+              h.memberCount !== Infinity &&
+              h.memberCount < UNCADASTRED_HOME_LIMIT,
+          ).length;
+          const loaded = homeIndex.homes.filter(
+            (h) => h.memberCount !== null,
+          ).length;
+
+          pushRunLog(run._id, {
+            level: "info",
+            message:
+              `Bo'sh joyli xonadon topilmadi — kursor ${randomCursor.index}/${total}, ` +
+              `o'qilgan ${loaded}, yaroqsiz ${unusable}, bo'sh joyli ${withRoom}`,
+          });
+          console.log(
+            `[Kadastrsiz][DIAG] outOfHomes: cursor=${randomCursor.index}/${total} loaded=${loaded} unusable=${unusable} withRoom=${withRoom} processed=${processed}`,
+          );
+
           outOfHomes = true;
           break outer;
         }
