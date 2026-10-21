@@ -174,7 +174,18 @@ const toDottedDate = (value) => {
     return `${day}.${month}.${rounded.getFullYear()}`;
   }
 
-  const text = String(value).trim();
+  // Oxiridagi vaqt qismini olib tashlaymiz. Manbada sana ba'zan
+  // MATN bo'lib, orqasida soat bilan keladi ("06.04.1975, 00:00:00"
+  // yoki "1975-04-06 00:00:00"). Vaqtsiz kerak: aks holda quyidagi
+  // nuqtali shablon `$` ga tushmay qolib, sana null bo'lib ketardi
+  // (tekshirilgan — "Yangi obod" faylidagi 976 qatordan hammasi).
+  const text = String(value)
+    .trim()
+    .replace(
+      /[\sT,]+\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*(?:Z|[+-]\d{2}:?\d{2})?$/,
+      "",
+    )
+    .trim();
   if (!text) return null;
 
   const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);

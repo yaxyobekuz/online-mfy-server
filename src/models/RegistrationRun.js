@@ -49,6 +49,26 @@ const registrationRunSchema = new Schema(
       default: "run",
     },
 
+    // --- Kiritish uslubi (BARCHA rejimga tegishli) ---
+    //
+    // Har "Boshlash"/"Random"/"Kadastrsiz" boshlanganda modaldan
+    // tanlanadi:
+    //   odatiy   — avvalgidek: bazadagi ma'lumot bilan kiritiladi
+    //   batafsil — har fuqaroni kiritishdan OLDIN davlat bazasidan
+    //              (pasport/ID, metrka yoki JSHSHIR) so'nggi ma'lumot
+    //              olinadi, MongoDB yangilanadi, so'ng kiritiladi
+    //   aqilli   — avval bazadagi ma'lumot bilan urinadi; xatolik bo'lsa
+    //              davlat bazasidan yangilab, bir marta qayta urinadi
+    //
+    // Eski yurishlarda maydon yo'q — `default: "odatiy"` barcha mavjud
+    // mantiqni o'zgarishsiz qoldiradi. Worker hamma joyda
+    // `run.entryMode ?? "odatiy"` o'qiydi.
+    entryMode: {
+      type: String,
+      enum: ["odatiy", "batafsil", "aqilli"],
+      default: "odatiy",
+    },
+
     // Qaysi bosqichda ekani (clientda bir qatorli izoh sifatida
     // ko'rsatiladi): "Ko'chalar yuklanmoqda", "12/340 — xonadon ..."
     stage: { type: String },

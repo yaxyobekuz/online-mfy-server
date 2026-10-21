@@ -51,6 +51,7 @@ import { surnameKey, fullNameSurnameKey } from "../utils/surname.js";
 import { randomUzPhone, normalizePhone } from "../utils/phone.js";
 import {
   toIsoDate,
+  toDottedDate,
   splitDocument,
   isBirthCertificate,
   extractBirthCertPerson,
@@ -58,6 +59,7 @@ import {
   shortenDocumentType,
   isExpiredDocument,
 } from "../utils/person-data.js";
+import { refreshPerson, pickFields } from "../utils/person-refresh.js";
 import {
   DEFAULT_RELATIONSHIP,
   documentTypeCode,
@@ -347,6 +349,112 @@ const rateLimited = (run, fn) =>
     adaptiveKey: `registration:${run.userUid}`,
     onWait: waitReporter(run),
   });
+
+// ---------------------------------------------------------------
+// Kiritish uslublari uchun — davlat bazasidan yangilash
+// ---------------------------------------------------------------
+
+// Yangilashda xotiradagi fuqaro obyektiga ko'chiriladigan maydonlar.
+// Keyingi tasdiqlash/payload shular bo'yicha ishlaydi.
+const PERSON_MUTABLE_FIELDS = [
+  "fullName",
+  "birthDate",
+  "document",
+  "documentSeries",
+  "documentNumber",
+  "documentType",
+  "pinfl",
+];
+
+// Aqilli uslubda xato bo'lsa QAYTA URINILMAYDIGAN sabablar — refresh
+// yordam bermaydi: odam boshqa xonadonda ro'yxatda yoki allaqachon bor.
+// (PERMANENT_REASON_CODES — vafot etgan, hujjat yaroqsiz va h.k. —
+// alohida qo'shiladi.)
+const AQILLI_NO_RETRY = new Set([
+  "allaqachon_mavjud",
+  "boshqa_xonadon_egasi",
+  "boshqa_xonadon_azosi",
+]);
+
+const isAqilliRetryable = (reasonCode) =>
+  !AQILLI_NO_RETRY.has(reasonCode) && !PERMANENT_REASON_CODES.includes(reasonCode);
+
+/**
+ * Bitta fuqaroni davlat bazasidan so'nggi ma'lumoti bilan yangilaydi:
+ * natijani modelga (`Model`) yozadi va XOTIRADAGI obyektni ham
+ * yangilaydi (keyingi tasdiqlash/payload yangi ma'lumotni ko'rsin).
+ *
+ * `allowedKeys` — modelga yoziladigan maydonlar ro'yxati (null bo'lsa
+ * butun `update` yoziladi — `Citizen` to'liq sync maydonlariga ega,
+ * `UncadastredCitizen` esa faqat bir qismiga).
+ *
+ * Qaytaradi: ma'lumot O'ZGARGAN bo'lsa `true` (aqilli shu bo'yicha
+ * qayta urinadi), aks holda `false`.
+ */
+const refreshPersonInto = async (Model, person, run, allowedKeys) => {
+  const snapshot = () =>
+    PERSON_MUTABLE_FIELDS.map((field) => person[field] ?? null).join("|");
+  const before = snapshot();
+
+  let result;
+  try {
+    result = await refreshPerson(person, {
+      rateLimit: (fn) => rateLimited(run, fn),
+    });
+  } catch (err) {
+    // Token eskirgan — butun yurishning muammosi, yuqoriga uzatamiz.
+    if (isAuthError(err)) throw new TokenExpiredError();
+
+    // Boshqa xato (tarmoq va h.k.) — yangilanmadi, mavjud ma'lumot
+    // bilan davom etiladi.
+    pushRunLog(run._id, {
+      level: "wait",
+      fullName: person.fullName,
+      message: `Davlat bazasidan yangilab bo'lmadi: ${describeError(err)}`,
+    });
+    return false;
+  }
+
+  if (result.notFound || !result.update) return false;
+
+  // 1) Modelga yozamiz.
+  if (person._id) {
+    const update = allowedKeys
+      ? pickFields(result.update, allowedKeys)
+      : result.update;
+
+    if (Object.keys(update).length) {
+      await Model.updateOne({ _id: person._id }, { $set: update }).catch(() => {});
+    }
+  }
+
+  // 2) Xotiradagi obyektni yangilaymiz. Sana doim "DD.MM.YYYY" bo'lsin —
+  //    keyingi `toIsoDate` buni kutadi (FHDYO javobi ISO bo'lishi mumkin).
+  for (const field of PERSON_MUTABLE_FIELDS) {
+    if (result.update[field] === undefined) continue;
+    person[field] =
+      field === "birthDate"
+        ? toDottedDate(result.update[field])
+        : result.update[field];
+  }
+
+  return snapshot() !== before;
+};
+
+const refreshCitizenInto = (citizen, run) =>
+  refreshPersonInto(Citizen, citizen, run, null);
+
+const UNCADASTRED_REFRESH_FIELDS = [
+  "fullName",
+  "birthDate",
+  "document",
+  "documentSeries",
+  "documentNumber",
+  "pinfl",
+];
+
+const refreshUncadastredInto = (citizen, run) =>
+  refreshPersonInto(UncadastredCitizen, citizen, run, UNCADASTRED_REFRESH_FIELDS);
 
 // ---------------------------------------------------------------
 // Tashqi API chaqiruvlari
@@ -981,55 +1089,87 @@ const registerOneMember = async (
     return "exists";
   }
 
-  // --- Davlat bazasidan tasdiqlash ---
-  let verification;
+  const entryMode = run.entryMode ?? "odatiy";
 
-  try {
-    verification = await verifyCitizen(citizen, run);
-  } catch (err) {
-    // Token eskirgan (401) — bu fuqaroning emas, butun yurishning
-    // muammosi. Uni "xato" deb belgilamay, yuqoriga uzatamiz: yurish
-    // pauza qilinadi. Yarim qolgan "pending" yozuvni o'chiramiz, aks
-    // holda u statistikada osilib qoladi (davom ettirilganda qayta
-    // yaratiladi).
-    if (isAuthError(err)) {
-      await RegistrationMember.deleteOne({ _id: member._id });
-      throw new TokenExpiredError();
-    }
-
-    // Tarmoq uzilishi — odamning aybi yo'q. Kutib, bir marta qayta
-    // urinamiz, aks holda uzilish paytidagi o'nlab odam bekorga
-    // "xato" bo'lib qolardi.
-    if (isNetworkError(err)) {
+  // BA'TAFSIL: tasdiqlashdan OLDIN davlat bazasidan so'nggi ma'lumotni
+  // olib, umumiy bazani (`Citizen`) va xotiradagi `citizen` ni
+  // yangilaymiz. Keyingi `verifyCitizen` yangilangan ma'lumotni ko'radi
+  // (JSHSHIR bor bo'lsa u bazaga ishonadi — ya'ni so'nggi ma'lumot).
+  if (entryMode === "batafsil") {
+    const changed = await refreshCitizenInto(citizen, run);
+    if (changed) {
       pushRunLog(run._id, {
-        level: "wait",
-        message: `Tarmoq uzildi (${err.code}) — ${NETWORK_WAIT_MS / 1000} soniya kutilmoqda`,
+        level: "info",
+        fullName: citizen.fullName,
+        message: "Ba'tafsil: davlat bazasidan yangilandi",
       });
+    }
+  }
 
-      await RegistrationRun.updateOne(
-        { _id: run._id },
-        { $set: { waitingUntil: Date.now() + NETWORK_WAIT_MS } },
-      );
-      await pause(NETWORK_WAIT_MS);
-      await RegistrationRun.updateOne(
-        { _id: run._id },
-        { $set: { waitingUntil: null } },
-      );
+  // Tasdiqlash + platformaga yuborishning bitta urinishi. Aqilli
+  // uslubda xatolikdan keyin (ma'lumot yangilangach) qayta chaqiriladi,
+  // shuning uchun alohida closure — kod takrorlanmaydi.
+  //
+  // Qaytaradi: { status, reasonCode }
+  const attempt = async () => {
+    let verification;
 
-      try {
-        verification = await verifyCitizen(citizen, run);
-      } catch (retryErr) {
-        if (isAuthError(retryErr)) {
-          await RegistrationMember.deleteOne({ _id: member._id });
-          throw new TokenExpiredError();
-        }
+    try {
+      verification = await verifyCitizen(citizen, run);
+    } catch (err) {
+      // Token eskirgan (401) — bu fuqaroning emas, butun yurishning
+      // muammosi. Uni "xato" deb belgilamay, yuqoriga uzatamiz: yurish
+      // pauza qilinadi. Yarim qolgan "pending" yozuvni o'chiramiz, aks
+      // holda u statistikada osilib qoladi (davom ettirilganda qayta
+      // yaratiladi).
+      if (isAuthError(err)) {
+        await RegistrationMember.deleteOne({ _id: member._id });
+        throw new TokenExpiredError();
+      }
 
-        const reason = describeError(retryErr);
-        await finish({
-          status: "failed",
-          reason,
-          reasonCode: reasonCodeOf(reason),
+      // Tarmoq uzilishi — odamning aybi yo'q. Kutib, bir marta qayta
+      // urinamiz, aks holda uzilish paytidagi o'nlab odam bekorga
+      // "xato" bo'lib qolardi.
+      if (isNetworkError(err)) {
+        pushRunLog(run._id, {
+          level: "wait",
+          message: `Tarmoq uzildi (${err.code}) — ${NETWORK_WAIT_MS / 1000} soniya kutilmoqda`,
         });
+
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          { $set: { waitingUntil: Date.now() + NETWORK_WAIT_MS } },
+        );
+        await pause(NETWORK_WAIT_MS);
+        await RegistrationRun.updateOne(
+          { _id: run._id },
+          { $set: { waitingUntil: null } },
+        );
+
+        try {
+          verification = await verifyCitizen(citizen, run);
+        } catch (retryErr) {
+          if (isAuthError(retryErr)) {
+            await RegistrationMember.deleteOne({ _id: member._id });
+            throw new TokenExpiredError();
+          }
+
+          const reason = describeError(retryErr);
+          const reasonCode = reasonCodeOf(reason);
+          await finish({ status: "failed", reason, reasonCode });
+
+          pushRunLog(run._id, {
+            level: "error",
+            fullName: citizen.fullName,
+            message: `Tasdiqlashda xatolik: ${reason}`,
+          });
+
+          return { status: "failed", reasonCode };
+        }
+      } else {
+        const reason = describeError(err);
+        const reasonCode = reasonCodeOf(reason);
+        await finish({ status: "failed", reason, reasonCode });
 
         pushRunLog(run._id, {
           level: "error",
@@ -1037,267 +1177,276 @@ const registerOneMember = async (
           message: `Tasdiqlashda xatolik: ${reason}`,
         });
 
-        return "failed";
+        return { status: "failed", reasonCode };
       }
-    } else {
-      const reason = describeError(err);
+    }
+
+    if (verification.skip) {
+      const skipCode = reasonCodeOf(verification.skip);
+
+      // Javobi hech qachon o'zgarmaydigan sabablar (vafot etgan,
+      // hujjati yaroqsiz, bazadan topilmadi...). Bir odam bazada bir
+      // nechta kadastrda uchraydi, random rejimda esa tasodifiy
+      // tanlov uni qayta chiqarishi mumkin — har safar davlat
+      // bazasidan qayta so'rash bekorga rate-limit sarflaydi.
+      // Shuning uchun band deb belgilaymiz.
+      if (PERMANENT_REASON_CODES.includes(skipCode) && citizen.pinfl) {
+        hopelessPinfls.set(String(citizen.pinfl), verification.skip);
+      }
+
       await finish({
+        status: "skipped",
+        reason: verification.skip,
+        reasonCode: skipCode,
+        registryResponse: verification.registryResponse ?? null,
+      });
+
+      pushRunLog(run._id, {
+        level: "skip",
+        fullName: citizen.fullName,
+        message: verification.skip,
+      });
+
+      return { status: "skipped", reasonCode: skipCode };
+    }
+
+    const verified = verification.verified;
+
+    // Guvohnoma orqali topilgan JSHSHIR'ni eslab qolamiz: shu bola
+    // boshqa kadastrda yoki xonadon qayta ishlanganda uchrasa, FHDYO
+    // so'rovi takrorlanmaydi.
+    if (certKey && verified.pinfl) {
+      certPinfls.set(certKey, String(verified.pinfl));
+    }
+
+    // Tasdiqlangandan keyin JSHSHIR o'zgargan bo'lishi mumkin (GCP
+    // "current_pinfl" ni qaytaradi). Shu JSHSHIR platformada bo'lsa —
+    // yubormaymiz, baribir rad etiladi.
+    if (knownPinfls.has(String(verified.pinfl))) {
+      const reason =
+        "Platformada allaqachon ro'yxatda (shu yoki boshqa xonadonda)";
+      await finish({
+        status: "exists",
+        reason,
+        reasonCode: "allaqachon_mavjud",
+        verifiedPinfl: verified.pinfl,
+        verifiedFullName: verified.fullName,
+        verifiedVia: verified.via,
+        registryResponse: verification.registryResponse ?? null,
+      });
+
+      pushRunLog(run._id, {
+        level: "skip",
+        fullName: verified.fullName,
+        message: reason,
+      });
+
+      return { status: "exists", reasonCode: "allaqachon_mavjud" };
+    }
+
+    const docType = documentTypeCode(verified.documentType);
+    if (!docType) {
+      const reason = `Hujjat turi aniqlanmadi: "${verified.documentType ?? "bo'sh"}"`;
+      await finish({ status: "skipped", reason, reasonCode: "boshqa" });
+
+      pushRunLog(run._id, {
+        level: "skip",
+        fullName: verified.fullName,
+        message: reason,
+      });
+
+      return { status: "skipped", reasonCode: "boshqa" };
+    }
+
+    if (!verified.docSeries || !verified.docNumber) {
+      const reason = "Hujjat seriyasi yoki raqami aniqlanmadi";
+      await finish({ status: "skipped", reason, reasonCode: "boshqa" });
+
+      pushRunLog(run._id, {
+        level: "skip",
+        fullName: verified.fullName,
+        message: reason,
+      });
+
+      return { status: "skipped", reasonCode: "boshqa" };
+    }
+
+    // --- Platformaga yuborish ---
+    const age = yearsOld(verified.birthDate);
+    const studyLevel = pickStudyLevel(age, verified.pinfl);
+
+    const payload = {
+      pinfl: Number(verified.pinfl),
+      full_name: verified.fullName,
+      address: null,
+      phone: "",
+      // Oxirgi himoya: qaysi bazadan kelganidan qat'i nazar sana ISO
+      // bo'lib ketsin. Platforma "DD.MM.YYYY" ni qabul qilmaydi va
+      // sababini aytmay 500 qaytaradi.
+      birth_date: toIsoDate(verified.birthDate) ?? verified.birthDate,
+      study_level_id: String(studyLevel),
+      doc_serial: verified.docSeries,
+      doc_number: verified.docNumber,
+      // Qarindoshlik darajasi umumiy fuqarolar bazasida yo'q — faqat
+      // kadastr bor, kim kimga nima bo'lishi yozilmagan. Noto'g'ri
+      // daraja ko'rsatgandan ko'ra "Boshqa" to'g'riroq.
+      relationship: String(DEFAULT_RELATIONSHIP),
+      document_type: String(docType),
+    };
+
+    const params = {
+      _target: "modal",
+      pinfl: verified.pinfl,
+      obl_id: user.oblId,
+      area_id: user.areaId,
+      district_id: user.districtId,
+      street_id: homeRow.streetId,
+      survey_uuid: homeRow.surveyUuid,
+      owner_pinfl: homeRow.ownerPinfl,
+    };
+
+    const verifiedFields = {
+      verifiedFullName: verified.fullName,
+      verifiedBirthDate: verified.birthDate,
+      verifiedPinfl: verified.pinfl,
+      verifiedDocSeries: verified.docSeries,
+      verifiedDocNumber: verified.docNumber,
+      verifiedDocumentType: verified.documentType,
+      verifiedVia: verified.via,
+      registryResponse: verification.registryResponse ?? null,
+      relationshipCode: String(DEFAULT_RELATIONSHIP),
+      studyLevelCode: String(studyLevel),
+      documentTypeCode: String(docType),
+      sentPayload: payload,
+      sentParams: params,
+    };
+
+    pushRunLog(run._id, {
+      level: "request",
+      fullName: verified.fullName,
+      message: `POST — ${verified.pinfl}, ${verified.docSeries}${verified.docNumber}, ${age} yosh, ta'lim kodi ${studyLevel}`,
+    });
+
+    try {
+      const response = await postFamilyMember(payload, params, run);
+      const memberId = response?.id != null ? String(response.id) : null;
+
+      await finish({
+        ...verifiedFields,
+        status: "added",
+        memberId,
+        platformResponse: response ?? null,
+        httpStatus: 200,
+        reason: null,
+        reasonCode: null,
+      });
+
+      // Shu yurishning o'zida bir xil odam ikkinchi marta uchrashi
+      // mumkin (bazada takrorlangan qator yoki bir odam bir nechta
+      // kadastrda) — endi u platformada bor.
+      knownPinfls.add(String(verified.pinfl));
+      takenPinfls.add(String(verified.pinfl));
+
+      pushRunLog(run._id, {
+        level: "success",
+        fullName: verified.fullName,
+        message: `Qo'shildi — ID ${memberId ?? "?"}`,
+        ms: Date.now() - startedAt,
+      });
+
+      return { status: "added" };
+    } catch (err) {
+      const reason = describeError(err);
+      const reasonCode = reasonCodeOf(reason);
+
+      // Platforma "bu odam allaqachon boshqa xonadonda ro'yxatda" deb
+      // rad etgan bo'lsa, uni band deb belgilaymiz: bazada bir odam
+      // bir nechta kadastrda uchraydi, keyingi xonadonlarda yana
+      // urinib, rate-limitni bekorga sarflamaymiz.
+      if (
+        ["boshqa_xonadon_egasi", "boshqa_xonadon_azosi", "allaqachon_mavjud"].includes(
+          reasonCode,
+        )
+      ) {
+        takenPinfls.add(String(verified.pinfl));
+      }
+
+      // Rad etish sababi ma'lumotning o'zidagi nuqsondan bo'lsa
+      // (masalan hujjat raqami platforma talabiga mos emas), qayta
+      // yuborish ham xuddi shu javobni oladi. Bunday odamni band deb
+      // belgilaymiz — keyingi uchrashuvda davlat bazasiga so'rov ham
+      // ketmaydi.
+      if (PERMANENT_REASON_CODES.includes(reasonCode)) {
+        hopelessPinfls.set(String(verified.pinfl), reason);
+        if (citizen.pinfl) hopelessPinfls.set(String(citizen.pinfl), reason);
+      }
+
+      // Platforma "boshqa xonadonda ro'yxatda" desa, xabar ichida
+      // o'sha joyning manzili bo'ladi. Uni ajratib saqlaymiz: mahalla
+      // xodimi uchun "odam qayerga ko'chib ketgan" degan savol
+      // hisobotdan ko'rinib tursin.
+      const place = parseRegisteredPlace(reason);
+      const placeFields = place
+        ? {
+            registeredRegion: place.region,
+            registeredMahalla: place.mahalla,
+            // O'z mahallamizda boshqa xonadondami yoki butunlay
+            // boshqa joydami — ikkisi mahalla uchun turli ma'no
+            // anglatadi.
+            //
+            // Taqqoslash `sameMahalla` orqali: platforma mahalla
+            // nomini biroz boshqacha yozadi ("Сарновул" / "САРНАВУЛ"),
+            // oddiy kalit solishtiruvi esa o'z mahallasini "ko'chib
+            // ketgan" deb ko'rsatib qo'yadi.
+            movedAway: !sameMahalla(place.mahalla, run.mahallaName),
+          }
+        : {};
+
+      await finish({
+        ...verifiedFields,
+        ...placeFields,
         status: "failed",
         reason,
-        reasonCode: reasonCodeOf(reason),
+        reasonCode,
+        platformResponse: err.response?.data ?? null,
+        httpStatus: err.response?.status ?? null,
       });
 
       pushRunLog(run._id, {
         level: "error",
-        fullName: citizen.fullName,
-        message: `Tasdiqlashda xatolik: ${reason}`,
+        fullName: verified.fullName,
+        message: reason,
+        status: err.response?.status,
+        ms: Date.now() - startedAt,
       });
 
-      return "failed";
+      return { status: "failed", reasonCode };
     }
-  }
-
-  if (verification.skip) {
-    const skipCode = reasonCodeOf(verification.skip);
-
-    // Javobi hech qachon o'zgarmaydigan sabablar (vafot etgan,
-    // hujjati yaroqsiz, bazadan topilmadi...). Bir odam bazada bir
-    // nechta kadastrda uchraydi, random rejimda esa tasodifiy
-    // tanlov uni qayta chiqarishi mumkin — har safar davlat
-    // bazasidan qayta so'rash bekorga rate-limit sarflaydi.
-    // Shuning uchun band deb belgilaymiz.
-    if (PERMANENT_REASON_CODES.includes(skipCode) && citizen.pinfl) {
-      hopelessPinfls.set(String(citizen.pinfl), verification.skip);
-    }
-
-    await finish({
-      status: "skipped",
-      reason: verification.skip,
-      reasonCode: skipCode,
-      registryResponse: verification.registryResponse ?? null,
-    });
-
-    pushRunLog(run._id, {
-      level: "skip",
-      fullName: citizen.fullName,
-      message: verification.skip,
-    });
-
-    return "skipped";
-  }
-
-  const verified = verification.verified;
-
-  // Guvohnoma orqali topilgan JSHSHIR'ni eslab qolamiz: shu bola
-  // boshqa kadastrda yoki xonadon qayta ishlanganda uchrasa, FHDYO
-  // so'rovi takrorlanmaydi.
-  if (certKey && verified.pinfl) {
-    certPinfls.set(certKey, String(verified.pinfl));
-  }
-
-  // Tasdiqlangandan keyin JSHSHIR o'zgargan bo'lishi mumkin (GCP
-  // "current_pinfl" ni qaytaradi). Shu JSHSHIR platformada bo'lsa —
-  // yubormaymiz, baribir rad etiladi.
-  if (knownPinfls.has(String(verified.pinfl))) {
-    const reason =
-      "Platformada allaqachon ro'yxatda (shu yoki boshqa xonadonda)";
-    await finish({
-      status: "exists",
-      reason,
-      reasonCode: "allaqachon_mavjud",
-      verifiedPinfl: verified.pinfl,
-      verifiedFullName: verified.fullName,
-      verifiedVia: verified.via,
-      registryResponse: verification.registryResponse ?? null,
-    });
-
-    pushRunLog(run._id, {
-      level: "skip",
-      fullName: verified.fullName,
-      message: reason,
-    });
-
-    return "exists";
-  }
-
-  const docType = documentTypeCode(verified.documentType);
-  if (!docType) {
-    const reason = `Hujjat turi aniqlanmadi: "${verified.documentType ?? "bo'sh"}"`;
-    await finish({ status: "skipped", reason, reasonCode: "boshqa" });
-
-    pushRunLog(run._id, {
-      level: "skip",
-      fullName: verified.fullName,
-      message: reason,
-    });
-
-    return "skipped";
-  }
-
-  if (!verified.docSeries || !verified.docNumber) {
-    const reason = "Hujjat seriyasi yoki raqami aniqlanmadi";
-    await finish({ status: "skipped", reason, reasonCode: "boshqa" });
-
-    pushRunLog(run._id, {
-      level: "skip",
-      fullName: verified.fullName,
-      message: reason,
-    });
-
-    return "skipped";
-  }
-
-  // --- Platformaga yuborish ---
-  const age = yearsOld(verified.birthDate);
-  const studyLevel = pickStudyLevel(age, verified.pinfl);
-
-  const payload = {
-    pinfl: Number(verified.pinfl),
-    full_name: verified.fullName,
-    address: null,
-    phone: "",
-    // Oxirgi himoya: qaysi bazadan kelganidan qat'i nazar sana ISO
-    // bo'lib ketsin. Platforma "DD.MM.YYYY" ni qabul qilmaydi va
-    // sababini aytmay 500 qaytaradi.
-    birth_date: toIsoDate(verified.birthDate) ?? verified.birthDate,
-    study_level_id: String(studyLevel),
-    doc_serial: verified.docSeries,
-    doc_number: verified.docNumber,
-    // Qarindoshlik darajasi umumiy fuqarolar bazasida yo'q — faqat
-    // kadastr bor, kim kimga nima bo'lishi yozilmagan. Noto'g'ri
-    // daraja ko'rsatgandan ko'ra "Boshqa" to'g'riroq.
-    relationship: String(DEFAULT_RELATIONSHIP),
-    document_type: String(docType),
   };
 
-  const params = {
-    _target: "modal",
-    pinfl: verified.pinfl,
-    obl_id: user.oblId,
-    area_id: user.areaId,
-    district_id: user.districtId,
-    street_id: homeRow.streetId,
-    survey_uuid: homeRow.surveyUuid,
-    owner_pinfl: homeRow.ownerPinfl,
-  };
+  let result = await attempt();
 
-  const verifiedFields = {
-    verifiedFullName: verified.fullName,
-    verifiedBirthDate: verified.birthDate,
-    verifiedPinfl: verified.pinfl,
-    verifiedDocSeries: verified.docSeries,
-    verifiedDocNumber: verified.docNumber,
-    verifiedDocumentType: verified.documentType,
-    verifiedVia: verified.via,
-    registryResponse: verification.registryResponse ?? null,
-    relationshipCode: String(DEFAULT_RELATIONSHIP),
-    studyLevelCode: String(studyLevel),
-    documentTypeCode: String(docType),
-    sentPayload: payload,
-    sentParams: params,
-  };
-
-  pushRunLog(run._id, {
-    level: "request",
-    fullName: verified.fullName,
-    message: `POST — ${verified.pinfl}, ${verified.docSeries}${verified.docNumber}, ${age} yosh, ta'lim kodi ${studyLevel}`,
-  });
-
-  try {
-    const response = await postFamilyMember(payload, params, run);
-    const memberId = response?.id != null ? String(response.id) : null;
-
-    await finish({
-      ...verifiedFields,
-      status: "added",
-      memberId,
-      platformResponse: response ?? null,
-      httpStatus: 200,
-      reason: null,
-      reasonCode: null,
-    });
-
-    // Shu yurishning o'zida bir xil odam ikkinchi marta uchrashi
-    // mumkin (bazada takrorlangan qator yoki bir odam bir nechta
-    // kadastrda) — endi u platformada bor.
-    knownPinfls.add(String(verified.pinfl));
-    takenPinfls.add(String(verified.pinfl));
-
-    pushRunLog(run._id, {
-      level: "success",
-      fullName: verified.fullName,
-      message: `Qo'shildi — ID ${memberId ?? "?"}`,
-      ms: Date.now() - startedAt,
-    });
-
-    return "added";
-  } catch (err) {
-    const reason = describeError(err);
-    const reasonCode = reasonCodeOf(reason);
-
-    // Platforma "bu odam allaqachon boshqa xonadonda ro'yxatda" deb
-    // rad etgan bo'lsa, uni band deb belgilaymiz: bazada bir odam
-    // bir nechta kadastrda uchraydi, keyingi xonadonlarda yana
-    // urinib, rate-limitni bekorga sarflamaymiz.
-    if (
-      ["boshqa_xonadon_egasi", "boshqa_xonadon_azosi", "allaqachon_mavjud"].includes(
-        reasonCode,
-      )
-    ) {
-      takenPinfls.add(String(verified.pinfl));
+  // AQILLI: birinchi urinish xato bilan tugadi. Agar sabab refresh
+  // yordam berishi mumkin bo'lgan turdan bo'lsa (ma'lumot mos emas va
+  // h.k.), davlat bazasidan yangilaymiz va — ma'lumot HAQIQATAN
+  // o'zgargan bo'lsa — bir marta qayta urinamiz.
+  if (
+    entryMode === "aqilli" &&
+    result.status === "failed" &&
+    isAqilliRetryable(result.reasonCode)
+  ) {
+    const changed = await refreshCitizenInto(citizen, run);
+    if (changed) {
+      pushRunLog(run._id, {
+        level: "info",
+        fullName: citizen.fullName,
+        message: "Aqilli: ma'lumot yangilandi, qayta urinilmoqda",
+      });
+      result = await attempt();
     }
-
-    // Rad etish sababi ma'lumotning o'zidagi nuqsondan bo'lsa
-    // (masalan hujjat raqami platforma talabiga mos emas), qayta
-    // yuborish ham xuddi shu javobni oladi. Bunday odamni band deb
-    // belgilaymiz — keyingi uchrashuvda davlat bazasiga so'rov ham
-    // ketmaydi.
-    if (PERMANENT_REASON_CODES.includes(reasonCode)) {
-      hopelessPinfls.set(String(verified.pinfl), reason);
-      if (citizen.pinfl) hopelessPinfls.set(String(citizen.pinfl), reason);
-    }
-
-    // Platforma "boshqa xonadonda ro'yxatda" desa, xabar ichida
-    // o'sha joyning manzili bo'ladi. Uni ajratib saqlaymiz: mahalla
-    // xodimi uchun "odam qayerga ko'chib ketgan" degan savol
-    // hisobotdan ko'rinib tursin.
-    const place = parseRegisteredPlace(reason);
-    const placeFields = place
-      ? {
-          registeredRegion: place.region,
-          registeredMahalla: place.mahalla,
-          // O'z mahallamizda boshqa xonadondami yoki butunlay
-          // boshqa joydami — ikkisi mahalla uchun turli ma'no
-          // anglatadi.
-          //
-          // Taqqoslash `sameMahalla` orqali: platforma mahalla
-          // nomini biroz boshqacha yozadi ("Сарновул" / "САРНАВУЛ"),
-          // oddiy kalit solishtiruvi esa o'z mahallasini "ko'chib
-          // ketgan" deb ko'rsatib qo'yadi.
-          movedAway: !sameMahalla(place.mahalla, run.mahallaName),
-        }
-      : {};
-
-    await finish({
-      ...verifiedFields,
-      ...placeFields,
-      status: "failed",
-      reason,
-      reasonCode,
-      platformResponse: err.response?.data ?? null,
-      httpStatus: err.response?.status ?? null,
-    });
-
-    pushRunLog(run._id, {
-      level: "error",
-      fullName: verified.fullName,
-      message: reason,
-      status: err.response?.status,
-      ms: Date.now() - startedAt,
-    });
-
-    return "failed";
   }
+
+  return result.status;
 };
 
 // ---------------------------------------------------------------
@@ -3744,6 +3893,23 @@ const pickHomeFor = async (
  */
 const postUncadastredMember = async (user, run, home, citizen, via) => {
   const startedAt = Date.now();
+  const entryMode = run.entryMode ?? "odatiy";
+
+  // BA'TAFSIL: kiritishdan OLDIN davlat bazasidan so'nggi ma'lumotni
+  // olib, kadastrsiz bazani (`UncadastredCitizen`) va xotiradagi
+  // `citizen` ni yangilaymiz. Bu pinfl/sana tekshiruvidan ham oldin
+  // bo'ladi — guvohnomali bolaga JSHSHIR topilsa, u endi kiritiladi.
+  if (entryMode === "batafsil") {
+    const changed = await refreshUncadastredInto(citizen, run);
+    if (changed) {
+      pushRunLog(run._id, {
+        level: "info",
+        fullName: citizen.fullName,
+        message: "Ba'tafsil: davlat bazasidan yangilandi",
+      });
+    }
+  }
+
   const pinfl = citizen.pinfl ? String(citizen.pinfl) : null;
 
   const finish = (fields) =>
@@ -3806,138 +3972,168 @@ const postUncadastredMember = async (user, run, home, citizen, via) => {
   }
 
   // Telefon: faylda bo'lsa o'zi, bo'lmasa avto-generate
-  // ("Qo'shimcha a'zolar" rejimidagi bilan bir xil mantiq).
+  // ("Qo'shimcha a'zolar" rejimidagi bilan bir xil mantiq). Bir marta
+  // tanlanadi — aqilli qayta urinishda ham o'zgarmasin.
   const phone = normalizePhone(citizen.phone) ?? randomUzPhone();
 
-  const age = yearsOld(isoBirthDate);
+  // Platformaga yuborishning bitta urinishi. Aqilli uslubda xatolikdan
+  // keyin (ma'lumot yangilangach) qayta chaqiriladi — shuning uchun
+  // payload har safar JORIY `citizen` dan quriladi.
+  //
+  // Qaytaradi: { status, reasonCode }  ("home_full" — xonadon to'ldi)
+  const attemptPost = async () => {
+    const isoBirth = toIsoDate(citizen.birthDate) ?? isoBirthDate;
+    const age = yearsOld(isoBirth);
 
-  const payload = {
-    pinfl: Number(pinfl),
-    full_name: citizen.fullName,
-    address: null,
-    phone,
-    birth_date: isoBirthDate,
-    study_level_id: String(pickStudyLevel(age, pinfl)),
-    doc_serial: citizen.documentSeries ?? "",
-    doc_number: citizen.documentNumber ?? "",
-    // Qarindoshlik: faylda ko'rsatilgan bo'lsa o'shani, bo'lmasa
-    // "Boshqa". Kadastr rejimida har doim "Boshqa" edi — u yerdagi
-    // manbada bu ustun umuman yo'q; kadastrsiz faylda esa bor.
-    relationship: String(citizen.relationshipCode ?? DEFAULT_RELATIONSHIP),
-    document_type: String(
-      isBirthCertificate(citizen.documentSeries) ? 2 : 1,
-    ),
-  };
+    const payload = {
+      pinfl: Number(pinfl),
+      full_name: citizen.fullName,
+      address: null,
+      phone,
+      birth_date: isoBirth,
+      study_level_id: String(pickStudyLevel(age, pinfl)),
+      doc_serial: citizen.documentSeries ?? "",
+      doc_number: citizen.documentNumber ?? "",
+      // Qarindoshlik: faylda ko'rsatilgan bo'lsa o'shani, bo'lmasa
+      // "Boshqa". Kadastr rejimida har doim "Boshqa" edi — u yerdagi
+      // manbada bu ustun umuman yo'q; kadastrsiz faylda esa bor.
+      relationship: String(citizen.relationshipCode ?? DEFAULT_RELATIONSHIP),
+      document_type: String(isBirthCertificate(citizen.documentSeries) ? 2 : 1),
+    };
 
-  const params = {
-    _target: "modal",
-    pinfl,
-    obl_id: user.oblId,
-    area_id: user.areaId,
-    district_id: user.districtId,
-    street_id: home.streetId,
-    survey_uuid: home.surveyUuid,
-    owner_pinfl: home.ownerPinfl,
-  };
+    const params = {
+      _target: "modal",
+      pinfl,
+      obl_id: user.oblId,
+      area_id: user.areaId,
+      district_id: user.districtId,
+      street_id: home.streetId,
+      survey_uuid: home.surveyUuid,
+      owner_pinfl: home.ownerPinfl,
+    };
 
-  // Taqsimlash qanday bo'lganini yozib qo'yamiz: xodim hisobotda
-  // "bu odam o'z oilasiga tushdimi yoki tasodifiy joygami" degan
-  // savolga javob topishi kerak.
-  const viaFields = {
-    sentPayload: payload,
-    sentParams: params,
-    relationshipCode: payload.relationship,
-    studyLevelCode: payload.study_level_id,
-    phone,
-    matchVia: via,
-    matchedOwnerFullName: home.ownerFullName ?? null,
-  };
-
-  pushRunLog(run._id, {
-    level: "request",
-    fullName: citizen.fullName,
-    message:
-      `POST — ${pinfl}, ${age} yosh, ` +
-      `${via === "familiya" ? `familiya mos (${home.ownerFullName ?? "?"})` : "random"}, ` +
-      `${home.homeNum ?? home.homeId}-uy`,
-  });
-
-  try {
-    const response = await postFamilyMember(payload, params, run);
-
-    await finish({
-      ...viaFields,
-      status: "added",
-      memberId: response?.id != null ? String(response.id) : null,
-      platformResponse: response ?? null,
-      httpStatus: 200,
-      reason: null,
-      reasonCode: null,
-    });
-
-    // Xonadonda bitta joy kamaydi.
-    if (Number.isFinite(home.memberCount)) home.memberCount += 1;
+    // Taqsimlash qanday bo'lganini yozib qo'yamiz: xodim hisobotda
+    // "bu odam o'z oilasiga tushdimi yoki tasodifiy joygami" degan
+    // savolga javob topishi kerak.
+    const viaFields = {
+      sentPayload: payload,
+      sentParams: params,
+      relationshipCode: payload.relationship,
+      studyLevelCode: payload.study_level_id,
+      phone,
+      matchVia: via,
+      matchedOwnerFullName: home.ownerFullName ?? null,
+    };
 
     pushRunLog(run._id, {
-      level: "success",
+      level: "request",
       fullName: citizen.fullName,
-      message: `Qo'shildi — ${home.homeNum ?? home.homeId}-uy (${via === "familiya" ? "familiya bo'yicha" : "random"})`,
-      ms: Date.now() - startedAt,
+      message:
+        `POST — ${pinfl}, ${age} yosh, ` +
+        `${via === "familiya" ? `familiya mos (${home.ownerFullName ?? "?"})` : "random"}, ` +
+        `${home.homeNum ?? home.homeId}-uy`,
     });
 
-    return "added";
-  } catch (err) {
-    // Token eskirgan — bu fuqaroning emas, butun yurishning
-    // muammosi. Yuqoriga uzatamiz: yurish pauza qilinadi.
-    if (isAuthError(err)) throw new TokenExpiredError();
+    try {
+      const response = await postFamilyMember(payload, params, run);
 
-    const reason = describeError(err);
-    const reasonCode = reasonCodeOf(reason);
-
-    // Xonadon to'lgan bo'lsa — bu odamning aybi emas. Xonadonni
-    // to'la deb belgilaymiz va odam KEYINGI xonadonda qayta
-    // urinadi (chaqiruvchi "home_full" dan shuni biladi). Yozuv
-    // YARATILMAYDI: aks holda bitta odam uchun bir nechta "xato"
-    // qatori paydo bo'lib, hisobot buzilardi.
-    if (/зиёд|ziyod|оила\s+аъзоси\s+киритиш|оила\s+азоси\s+киритиш/i.test(reason)) {
-      home.memberCount = UNCADASTRED_HOME_LIMIT;
-
-      pushRunLog(run._id, {
-        level: "info",
-        message: `${home.homeNum ?? home.homeId}-uy to'ldi — keyingi xonadonga o'tiladi`,
+      await finish({
+        ...viaFields,
+        status: "added",
+        memberId: response?.id != null ? String(response.id) : null,
+        platformResponse: response ?? null,
+        httpStatus: 200,
+        reason: null,
+        reasonCode: null,
       });
 
-      return "home_full";
+      // Xonadonda bitta joy kamaydi.
+      if (Number.isFinite(home.memberCount)) home.memberCount += 1;
+
+      pushRunLog(run._id, {
+        level: "success",
+        fullName: citizen.fullName,
+        message: `Qo'shildi — ${home.homeNum ?? home.homeId}-uy (${via === "familiya" ? "familiya bo'yicha" : "random"})`,
+        ms: Date.now() - startedAt,
+      });
+
+      return { status: "added" };
+    } catch (err) {
+      // Token eskirgan — bu fuqaroning emas, butun yurishning
+      // muammosi. Yuqoriga uzatamiz: yurish pauza qilinadi.
+      if (isAuthError(err)) throw new TokenExpiredError();
+
+      const reason = describeError(err);
+      const reasonCode = reasonCodeOf(reason);
+
+      // Xonadon to'lgan bo'lsa — bu odamning aybi emas. Xonadonni
+      // to'la deb belgilaymiz va odam KEYINGI xonadonda qayta
+      // urinadi (chaqiruvchi "home_full" dan shuni biladi). Yozuv
+      // YARATILMAYDI: aks holda bitta odam uchun bir nechta "xato"
+      // qatori paydo bo'lib, hisobot buzilardi.
+      if (/зиёд|ziyod|оила\s+аъзоси\s+киритиш|оила\s+азоси\s+киритиш/i.test(reason)) {
+        home.memberCount = UNCADASTRED_HOME_LIMIT;
+
+        pushRunLog(run._id, {
+          level: "info",
+          message: `${home.homeNum ?? home.homeId}-uy to'ldi — keyingi xonadonga o'tiladi`,
+        });
+
+        return { status: "home_full" };
+      }
+
+      const place = parseRegisteredPlace(reason);
+
+      await finish({
+        ...viaFields,
+        status: reasonCode === "allaqachon_mavjud" ? "exists" : "failed",
+        reason,
+        reasonCode,
+        platformResponse: err.response?.data ?? null,
+        httpStatus: err.response?.status ?? null,
+        ...(place
+          ? {
+              registeredRegion: place.region,
+              registeredMahalla: place.mahalla,
+              movedAway: !sameMahalla(place.mahalla, run.mahallaName),
+            }
+          : {}),
+      });
+
+      pushRunLog(run._id, {
+        level: reasonCode === "allaqachon_mavjud" ? "skip" : "error",
+        fullName: citizen.fullName,
+        message: reason,
+        status: err.response?.status,
+        ms: Date.now() - startedAt,
+      });
+
+      return { status: reasonCode === "allaqachon_mavjud" ? "exists" : "failed", reasonCode };
     }
+  };
 
-    const place = parseRegisteredPlace(reason);
+  let result = await attemptPost();
 
-    await finish({
-      ...viaFields,
-      status: reasonCode === "allaqachon_mavjud" ? "exists" : "failed",
-      reason,
-      reasonCode,
-      platformResponse: err.response?.data ?? null,
-      httpStatus: err.response?.status ?? null,
-      ...(place
-        ? {
-            registeredRegion: place.region,
-            registeredMahalla: place.mahalla,
-            movedAway: !sameMahalla(place.mahalla, run.mahallaName),
-          }
-        : {}),
-    });
-
-    pushRunLog(run._id, {
-      level: reasonCode === "allaqachon_mavjud" ? "skip" : "error",
-      fullName: citizen.fullName,
-      message: reason,
-      status: err.response?.status,
-      ms: Date.now() - startedAt,
-    });
-
-    return reasonCode === "allaqachon_mavjud" ? "exists" : "failed";
+  // AQILLI: xatolik bo'lsa (xonadon to'lishi EMAS), davlat bazasidan
+  // yangilab, ma'lumot haqiqatan o'zgargan bo'lsa bir marta qayta
+  // urinamiz.
+  if (
+    entryMode === "aqilli" &&
+    result.status === "failed" &&
+    isAqilliRetryable(result.reasonCode)
+  ) {
+    const changed = await refreshUncadastredInto(citizen, run);
+    if (changed) {
+      pushRunLog(run._id, {
+        level: "info",
+        fullName: citizen.fullName,
+        message: "Aqilli: ma'lumot yangilandi, qayta urinilmoqda",
+      });
+      result = await attemptPost();
+    }
   }
+
+  return result.status;
 };
 
 /**

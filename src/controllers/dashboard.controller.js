@@ -76,6 +76,16 @@ export const isHomeFinished = (home) => {
   return touched > 0;
 };
 
+// Modaldan kelgan kiritish uslubi — faqat ma'lum qiymatlar, aks holda
+// xavfsiz standart ("odatiy"). Shunday qilib eski client yoki buzilgan
+// so'rov yurishni noma'lum rejimga tushirmaydi.
+const ENTRY_MODES = new Set(["odatiy", "batafsil", "aqilli"]);
+
+const normalizeEntryMode = (value) => {
+  const mode = String(value ?? "").trim();
+  return ENTRY_MODES.has(mode) ? mode : "odatiy";
+};
+
 const requireUser = (res) => {
   const user = getRequestUser();
   if (!user) {
@@ -1035,6 +1045,12 @@ export const controlDashboard = async (req, res) => {
         resumable.randomExcludedStreetIds = (user.excludedStreetIds ?? []).map(
           String,
         );
+        // Davom ettirganda ham uslubni o'zgartirish mumkin. Body'da
+        // kelmasa — eskisi saqlanadi (xodim shunchaki "Boshlash"
+        // bosgan bo'lishi mumkin).
+        if (req.body?.entryMode) {
+          resumable.entryMode = normalizeEntryMode(req.body.entryMode);
+        }
         await resumable.save();
 
         runRegistration(user, resumable, resumable.token);
@@ -1058,6 +1074,8 @@ export const controlDashboard = async (req, res) => {
         oblId: user.oblId,
         areaId: user.areaId,
         districtId: user.districtId,
+        // Modaldan tanlangan kiritish uslubi (odatiy/batafsil/aqilli).
+        entryMode: normalizeEntryMode(req.body?.entryMode),
         // Sozlamada belgilanmagan ko'chalar bu rejimda ham chetlab
         // o'tiladi (avval faqat random rejimda shunday edi).
         randomExcludedStreetIds: (user.excludedStreetIds ?? []).map(String),
@@ -1319,6 +1337,7 @@ export const randomStart = async (req, res) => {
       oblId: user.oblId,
       areaId: user.areaId,
       districtId: user.districtId,
+      entryMode: normalizeEntryMode(req.body?.entryMode),
       randomMode: true,
       randomTarget: target,
       randomAdded: 0,
@@ -1593,6 +1612,7 @@ export const uncadastredStart = async (req, res) => {
       oblId: user.oblId,
       areaId: user.areaId,
       districtId: user.districtId,
+      entryMode: normalizeEntryMode(req.body?.entryMode),
       uncadastredMode: true,
       uncadastredGroupId: group._id,
       uncadastredGroupName: group.name,
