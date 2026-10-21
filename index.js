@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 5000;
 
 await connectDB();
 
-// Server qayta ishga tushganda, OLDINGI nusxasi qoldirgan egalikni
+// Server qayta ishga tushganda, OLDINGI nusxasi qoldirgan egalikni 
 // bo'shatib, uzilib qolgan yurishlarni AVTOMATIK davom ettiramiz.
 //
 // Nega kerak: ishchi egalikni `finally` blokida bo'shatadi, lekin
