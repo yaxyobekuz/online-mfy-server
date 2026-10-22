@@ -1,4 +1,3 @@
-import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser } from "../utils/request-context.js";
 import {
@@ -12,36 +11,43 @@ import {
 /**
  * Ko'chalar kesimida ro'yxatga olingan aholi.
  *
- * Har bir xonadon yozuvida (`RegistrationHome`) o'sha xonadonda shu
- * yurishda haqiqatan qo'shilgan odamlar soni (`addedCount`) va ko'cha
- * nomi (`streetName`) turadi. Shuning uchun ko'cha bo'yicha "nechtadan
- * kiritildi" ni to'g'ridan-to'g'ri shu yerdan yig'ib olamiz — hisob
- * doirasi (qaysi yurishlar) kartochkalar bilan bir xil `scope.runIds`
- * dan keladi.
+ * Son AYNAN "Ro'yxatga olingan aholi" kartochkasi bilan bir manbadan —
+ * `RegistrationMember` yozuvlaridan — olinadi: holati `added` bo'lgan har
+ * bir ODAM o'zi tegishli xonadon orqali (`homeRowId` -> `RegistrationHome`)
+ * ko'chaga bog'lanadi va ko'cha bo'yicha sanaladi. Shuning uchun ko'chalar
+ * yig'indisi kartochkadagi songa (masalan 1533) to'liq mos keladi.
  *
- * Xonadonlar soni ham sanaladi: ishlab bo'lingan / jami — xodim qaysi
- * ko'cha to'liq yopilganini ko'rishi uchun.
+ * Nega xonadon sanog'i (`addedCount`) emas: u random/kadastrsiz rejimda
+ * qo'shilganlarni to'liq qamramaydi va qayta ishlangan xonadonda qayta
+ * yoziladi — natijada ko'chalar yig'indisi kartochkadan kam chiqardi.
+ *
+ * Hisob doirasi (`scope`) kartochkalar bilan bir xil `memberScopeMatch`
+ * orqali beriladi.
  */
-const collectStreetBreakdown = async (runIds) => {
-  if (!runIds.length) return [];
+const collectStreetBreakdown = async (scope) => {
+  if (!scope.runIds.length && !scope.randomRunIds.length) return [];
 
-  const rows = await RegistrationHome.aggregate([
-    { $match: { runId: { $in: runIds } } },
+  const rows = await RegistrationMember.aggregate([
+    { $match: { ...memberScopeMatch(scope), status: "added" } },
     {
-      // Bir kadastr bir necha yurishda uchrashi mumkin — har
-      // xonadondan BITTA yozuv (eng ko'p qo'shgani) olinadi, aks holda
-      // qayta ishlangan xonadon ikki marta sanalardi.
-      $group: {
-        _id: { $ifNull: ["$cadasterNumber", "$_id"] },
-        streetName: { $first: "$streetName" },
-        added: { $max: { $ifNull: ["$addedCount", 0] } },
+      // Odamni ko'chaga bog'lash: urinish o'z xonadon yozuviga
+      // (`homeRowId`) ishora qiladi, ko'cha nomi o'sha yerda turadi.
+      $lookup: {
+        from: "registrationhomes",
+        localField: "homeRowId",
+        foreignField: "_id",
+        as: "home",
       },
     },
     {
       $group: {
-        _id: { $ifNull: ["$streetName", "Noma'lum ko'cha"] },
-        added: { $sum: "$added" },
-        homes: { $sum: 1 },
+        _id: {
+          $ifNull: [
+            { $arrayElemAt: ["$home.streetName", 0] },
+            "Noma'lum ko'cha",
+          ],
+        },
+        added: { $sum: 1 },
       },
     },
     { $sort: { added: -1, _id: 1 } },
@@ -50,7 +56,6 @@ const collectStreetBreakdown = async (runIds) => {
   return rows.map((row) => ({
     streetName: row._id,
     added: row.added,
-    homes: row.homes,
   }));
 };
 
@@ -87,7 +92,7 @@ export const getDashboardReport = async (req, res) => {
       ]);
       timeSpentMs = totals?.totalMs ?? 0;
 
-      byStreet = await collectStreetBreakdown(scope.runIds);
+      byStreet = await collectStreetBreakdown(scope);
     }
 
     return res.status(200).json({
