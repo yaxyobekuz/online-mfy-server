@@ -1,3 +1,4 @@
+import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
 import { getRequestUser } from "../utils/request-context.js";
 import {
@@ -7,6 +8,51 @@ import {
   resolveMahalla,
   resolveScope,
 } from "./dashboard.controller.js";
+
+/**
+ * Ko'chalar kesimida ro'yxatga olingan aholi.
+ *
+ * Har bir xonadon yozuvida (`RegistrationHome`) o'sha xonadonda shu
+ * yurishda haqiqatan qo'shilgan odamlar soni (`addedCount`) va ko'cha
+ * nomi (`streetName`) turadi. Shuning uchun ko'cha bo'yicha "nechtadan
+ * kiritildi" ni to'g'ridan-to'g'ri shu yerdan yig'ib olamiz — hisob
+ * doirasi (qaysi yurishlar) kartochkalar bilan bir xil `scope.runIds`
+ * dan keladi.
+ *
+ * Xonadonlar soni ham sanaladi: ishlab bo'lingan / jami — xodim qaysi
+ * ko'cha to'liq yopilganini ko'rishi uchun.
+ */
+const collectStreetBreakdown = async (runIds) => {
+  if (!runIds.length) return [];
+
+  const rows = await RegistrationHome.aggregate([
+    { $match: { runId: { $in: runIds } } },
+    {
+      // Bir kadastr bir necha yurishda uchrashi mumkin — har
+      // xonadondan BITTA yozuv (eng ko'p qo'shgani) olinadi, aks holda
+      // qayta ishlangan xonadon ikki marta sanalardi.
+      $group: {
+        _id: { $ifNull: ["$cadasterNumber", "$_id"] },
+        streetName: { $first: "$streetName" },
+        added: { $max: { $ifNull: ["$addedCount", 0] } },
+      },
+    },
+    {
+      $group: {
+        _id: { $ifNull: ["$streetName", "Noma'lum ko'cha"] },
+        added: { $sum: "$added" },
+        homes: { $sum: 1 },
+      },
+    },
+    { $sort: { added: -1, _id: 1 } },
+  ]);
+
+  return rows.map((row) => ({
+    streetName: row._id,
+    added: row.added,
+    homes: row.homes,
+  }));
+};
 
 /**
  * GET /api/dashboard/report
@@ -32,6 +78,7 @@ export const getDashboardReport = async (req, res) => {
     const stats = await collectStats(run, user.uid);
 
     let timeSpentMs = 0;
+    let byStreet = [];
     if (run) {
       const scope = await resolveScope(run, user.uid);
       const [totals] = await RegistrationMember.aggregate([
@@ -39,6 +86,8 @@ export const getDashboardReport = async (req, res) => {
         { $group: { _id: null, totalMs: { $sum: "$durationMs" } } },
       ]);
       timeSpentMs = totals?.totalMs ?? 0;
+
+      byStreet = await collectStreetBreakdown(scope.runIds);
     }
 
     return res.status(200).json({
@@ -65,6 +114,7 @@ export const getDashboardReport = async (req, res) => {
         failed: stats.failed,
         pending: stats.pending,
       },
+      byStreet,
       timeSpentMs,
     });
   } catch {
