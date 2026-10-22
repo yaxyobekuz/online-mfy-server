@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import UncadastredCitizen from "../models/UncadastredCitizen.js";
 import UncadastredGroup from "../models/UncadastredGroup.js";
 import MfyToken from "../models/MfyToken.js";
+import RegistrationRun from "../models/RegistrationRun.js";
 import { getRequestUser } from "../utils/request-context.js";
 import { mahallaKey, extractMahallaName } from "../utils/mahalla.js";
 import { surnameKey, extractLastName } from "../utils/surname.js";
@@ -798,6 +799,30 @@ export const uploadUncadastred = async (req, res) => {
     // --- Yozuvlar ---
     if (mode === "replace") {
       await UncadastredCitizen.deleteMany({ groupId: group._id });
+
+      // Eski yozuvlar o'chdi — shu guruhning tugallanmagan jarayonidagi
+      // skaner kursori va hisoblagichlari endi ma'nosiz (kursor o'chgan
+      // `_id` ga ishora qiladi). Ularni nolga qaytaramiz: "Boshlash"
+      // bosilganda jarayon yangi ro'yxatni boshidan, toza hisoblagich
+      // bilan ko'zdan kechiradi. (Platformada dublikat baribir paydo
+      // bo'lmaydi — band JSHSHIR'lar o'tkazib yuboriladi.)
+      await RegistrationRun.updateMany(
+        {
+          uncadastredGroupId: group._id,
+          status: { $in: ["paused", "stopped", "error", "pending"] },
+        },
+        {
+          $set: {
+            uncadastredLastId: null,
+            uncadastredProcessed: 0,
+            membersAdded: 0,
+            membersFailed: 0,
+            membersSkipped: 0,
+            matchedBySurname: 0,
+            matchedRandomly: 0,
+          },
+        },
+      ).catch(() => {});
     }
 
     // Yozuvdagi MFY nomi guruhdan olinadi: faylda har qator uchun

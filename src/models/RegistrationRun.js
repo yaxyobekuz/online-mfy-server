@@ -69,6 +69,13 @@ const registrationRunSchema = new Schema(
       default: "odatiy",
     },
 
+    // "JSHSHIR orqali ma'lumotni yaxshilash" — modaldagi belgi (BARCHA
+    // rejimga tegishli, uslubdan mustaqil). Yoqilsa, tug'ilgan sanasi
+    // yo'q, lekin JSHSHIR'i bor fuqaroning sanasi JSHSHIR'dan tiklanadi
+    // (JSHSHIR'ning 2–7 raqamlari — DDMMYY). Avval bunday odam "sana
+    // yo'q" deb o'tkazib yuborilardi.
+    enrichFromPinfl: { type: Boolean, default: false },
+
     // Qaysi bosqichda ekani (clientda bir qatorli izoh sifatida
     // ko'rsatiladi): "Ko'chalar yuklanmoqda", "12/340 — xonadon ..."
     stage: { type: String },
@@ -187,6 +194,23 @@ const registrationRunSchema = new Schema(
     // Modalda tanlanadi.
     uncadastredGroupId: { type: Schema.Types.ObjectId, ref: "UncadastredGroup" },
     uncadastredGroupName: { type: String },
+
+    // --- Kadastrsiz skaner kursori ---
+    //
+    // Jarayon to'xtab, keyin "Boshlash" bilan davom ettirilganda
+    // ro'yxatni BOSHIDAN qayta ko'zdan kechirmasligi uchun: ishchi shu
+    // `_id` dan keyingi fuqarodan davom etadi va har qadamda yangilaydi.
+    // (Oddiy kadastr rejimida buning o'rniga xonadon navbati —
+    // `RegistrationHome` — bor; kadastrsizda bunday navbat yo'q, chunki
+    // manba bir tekis fuqarolar ro'yxati.)
+    //
+    // Eski yurishlarda maydon yo'q (`null`) — ishchi avvalgidek boshidan
+    // boshlaydi, ya'ni o'zgarish orqaga mos.
+    uncadastredLastId: { type: Schema.Types.ObjectId, default: null },
+    // Nechta fuqaro ko'zdan kechirilgani (band JSHSHIR'lar ham kiradi) —
+    // panelda "117/15528" ko'rinishida chiqadi. Kursor bilan birga
+    // saqlanadi, shunda davom etganda noldan sanamaydi.
+    uncadastredProcessed: { type: Number, default: 0 },
 
     // Taqsimlash natijasi — panelda alohida ko'rsatiladi: xodim
     // nechta odam HAQIQATAN o'z oilasiga, nechtasi random joyga

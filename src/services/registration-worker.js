@@ -58,6 +58,7 @@ import {
   joinName,
   shortenDocumentType,
   isExpiredDocument,
+  birthDateFromPinfl,
 } from "../utils/person-data.js";
 import { refreshPerson, pickFields } from "../utils/person-refresh.js";
 import {
@@ -683,6 +684,27 @@ const documentParts = (citizen) => {
  * Qaytaradi: { verified, registryResponse } yoki { skip, registryResponse }
  */
 const verifyCitizen = async (citizen, run) => {
+  // JSHSHIR orqali yaxshilash: sana yo'q, lekin JSHSHIR bor bo'lsa,
+  // sanani JSHSHIR'dan tiklaymiz (2–7 raqam — DDMMYY). Faqat modalda
+  // yoqilgan bo'lsa. Aks holda sanasiz odam quyida darhol chetga chiqadi.
+  if (run.enrichFromPinfl && citizen.pinfl && !toIsoDate(citizen.birthDate)) {
+    const derived = birthDateFromPinfl(citizen.pinfl);
+    if (derived) {
+      citizen.birthDate = derived;
+      if (citizen._id) {
+        await Citizen.updateOne(
+          { _id: citizen._id },
+          { $set: { birthDate: derived } },
+        ).catch(() => {});
+      }
+      pushRunLog(run._id, {
+        level: "info",
+        fullName: citizen.fullName,
+        message: `Tug'ilgan sana JSHSHIR'dan tiklandi: ${derived}`,
+      });
+    }
+  }
+
   const isoBirthDate = toIsoDate(citizen.birthDate);
   if (!isoBirthDate) {
     return { skip: "Tug'ilgan sana noto'g'ri yoki yo'q" };
@@ -4014,6 +4036,29 @@ const postUncadastredMember = async (user, run, home, citizen, via) => {
     return "skipped";
   }
 
+  // JSHSHIR orqali yaxshilash: sana yo'q/noto'g'ri, lekin JSHSHIR bor
+  // bo'lsa, sanani JSHSHIR'dan tiklaymiz (2–7 raqam — DDMMYY). Avval
+  // bunday odam "sana yo'q" deb o'tkazib yuborilardi. Faqat shu belgi
+  // yoqilgan bo'lsa ishlaydi — xodim modalda tanlaydi.
+  if (run.enrichFromPinfl && !toIsoDate(citizen.birthDate)) {
+    const derived = birthDateFromPinfl(pinfl);
+    if (derived) {
+      citizen.birthDate = derived;
+      // Kadastrsiz bazaga ham yozib qo'yamiz: ro'yxatda to'g'ri
+      // ko'rinsin va keyingi safar qayta hisoblash shart bo'lmasin.
+      await UncadastredCitizen.updateOne(
+        { _id: citizen._id },
+        { $set: { birthDate: derived } },
+      ).catch(() => {});
+
+      pushRunLog(run._id, {
+        level: "info",
+        fullName: citizen.fullName,
+        message: `Tug'ilgan sana JSHSHIR'dan tiklandi: ${derived}`,
+      });
+    }
+  }
+
   const isoBirthDate = toIsoDate(citizen.birthDate);
 
   if (!isoBirthDate) {
@@ -4348,15 +4393,22 @@ const runUncadastredWorker = async (user, runDoc) => {
     // bo'lishi mumkin. Bo'laklab o'qiymiz — `_id` bo'yicha oldinga
     // siljib (`skip` ishlatmasdan: katta kolleksiyada u sekinlashadi).
     const BATCH = 500;
-    let lastId = null;
 
-    let added = 0;
-    let failed = 0;
-    let skipped = 0;
+    // Davom ettirish: ishni BOSHIDAN emas, saqlangan kursordan boshlaymiz.
+    // Shunda avval ishlangan (kiritilgan/o'tkazilgan) minglab odam qayta
+    // O'QILMAYDI ham — darhol ularning orqasidan davom etamiz. Eski
+    // yurishlarda maydon yo'q (`null`) — avvalgidek boshidan.
+    let lastId = fresh.uncadastredLastId ?? null;
+
+    // Hisoblagichlar ham yurishning o'zidan davom etadi (noldan emas):
+    // panel "6117/15528" ko'rsatsin, nol emas.
+    let added = fresh.membersAdded ?? 0;
+    let failed = fresh.membersFailed ?? 0;
+    let skipped = fresh.membersSkipped ?? 0;
     let exists = 0;
     let bySurnameCount = fresh.matchedBySurname ?? 0;
     let randomlyCount = fresh.matchedRandomly ?? 0;
-    let processed = 0;
+    let processed = fresh.uncadastredProcessed ?? 0;
     let outOfHomes = false;
 
     const total = await UncadastredCitizen.countDocuments({ groupId });
@@ -4373,7 +4425,7 @@ const runUncadastredWorker = async (user, runDoc) => {
         $set: {
           status: "running",
           membersTotal: total,
-          stage: `Kadastrsiz — 0/${total}`,
+          stage: `Kadastrsiz — ${processed}/${total}`,
           heartbeatAt: new Date(),
         },
       },
@@ -4567,11 +4619,31 @@ const runUncadastredWorker = async (user, runDoc) => {
               membersSkipped: skipped,
               matchedBySurname: bySurnameCount,
               matchedRandomly: randomlyCount,
+              // Kursor: davom ettirilganda shu odamdan keyingisidan
+              // boshlansin (yuqoridagi `lastId` bilan birga).
+              uncadastredLastId: lastId,
+              uncadastredProcessed: processed,
               heartbeatAt: new Date(),
             },
           },
         );
       }
+
+      // Partiya oxirida kursorni bir marta saqlaymiz: agar butun partiya
+      // band JSHSHIR bo'lib (har biri yuqorida darhol `continue` qilingan)
+      // bitta ham DB yozuvi bo'lmagan bo'lsa ham, kursor oldinga suriladi —
+      // aks holda uzilishdan keyin shu partiya qayta o'qilardi.
+      await RegistrationRun.updateOne(
+        { _id: run._id },
+        {
+          $set: {
+            uncadastredLastId: lastId,
+            uncadastredProcessed: processed,
+            membersSkipped: skipped,
+            heartbeatAt: new Date(),
+          },
+        },
+      ).catch(() => {});
     }
 
     if (outOfHomes) {

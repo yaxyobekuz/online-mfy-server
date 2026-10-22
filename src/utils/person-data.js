@@ -25,6 +25,53 @@ export const toDottedDate = (isoDate) => {
   return `${day}.${month}.${year}`;
 };
 
+/**
+ * JSHSHIR (PINFL) dan tug'ilgan sanani tiklaydi -> "DD.MM.YYYY".
+ *
+ * JSHSHIR — aynan 14 raqam va tug'ilgan sana uning ichida kodlangan:
+ *   - 1-raqam    — asr va jins:
+ *                    1,2 -> 18YY   3,4 -> 19YY   5,6 -> 20YY
+ *                  (toq — erkak, juft — ayol; bu yerda faqat ASR kerak).
+ *   - 2–7 raqam  — sana DDMMYY ko'rinishida (misol: "010180" -> 01.01.1980).
+ *
+ * Nega kerak: manbada ba'zi odamlarning tug'ilgan sanasi yo'q, lekin
+ * JSHSHIR'i bor. Platforma sanani majburiy talab qiladi, shuning uchun
+ * bunday odam avval "sana yo'q" deb o'tkazib yuborilardi. JSHSHIR'dan
+ * sana aniq va deterministik tiklanadi.
+ *
+ * Yaroqsiz qiymatda (uzunlik noto'g'ri, asr kodi notanish yoki sana
+ * mavjud bo'lmagan kun — masalan 31.02) `null` qaytaradi.
+ */
+const PINFL_CENTURY = { 1: 1800, 2: 1800, 3: 1900, 4: 1900, 5: 2000, 6: 2000 };
+
+export const birthDateFromPinfl = (pinfl) => {
+  const digits = String(pinfl ?? "").replace(/\D/g, "");
+  if (digits.length !== 14) return null;
+
+  const century = PINFL_CENTURY[digits[0]];
+  if (!century) return null;
+
+  const day = Number(digits.slice(1, 3));
+  const month = Number(digits.slice(3, 5));
+  const year = century + Number(digits.slice(5, 7));
+
+  // Sana haqiqatan mavjudligini tekshiramiz (31.02 kabi qiymat
+  // JSHSHIR xato terilgan bo'lsa chiqishi mumkin — saqlamaymiz).
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day ||
+    year > new Date().getFullYear()
+  ) {
+    return null;
+  }
+
+  const dd = String(day).padStart(2, "0");
+  const mm = String(month).padStart(2, "0");
+  return `${dd}.${mm}.${year}`;
+};
+
 // GCP hujjat turini uzun rasmiy nom bilan qaytaradi
 // ("O'zbekiston Respublikasi fuqarosining ID-kartasi"). Qisqa va
 // bir xil shaklga keltiramiz.

@@ -86,6 +86,10 @@ const normalizeEntryMode = (value) => {
   return ENTRY_MODES.has(mode) ? mode : "odatiy";
 };
 
+// Modaldan kelgan belgi (checkbox). JSON'da `true`/`false` keladi,
+// lekin ehtiyot uchun matn ("true") ham qoplanadi.
+const normalizeBool = (value) => value === true || value === "true";
+
 const requireUser = (res) => {
   const user = getRequestUser();
   if (!user) {
@@ -1051,6 +1055,11 @@ export const controlDashboard = async (req, res) => {
         if (req.body?.entryMode) {
           resumable.entryMode = normalizeEntryMode(req.body.entryMode);
         }
+        // "JSHSHIR orqali yaxshilash" belgisi — har "Boshlash" da
+        // modaldan qayta keladi; kelgan bo'lsa yangilaymiz.
+        if (req.body?.enrichFromPinfl !== undefined) {
+          resumable.enrichFromPinfl = normalizeBool(req.body.enrichFromPinfl);
+        }
         await resumable.save();
 
         runRegistration(user, resumable, resumable.token);
@@ -1076,6 +1085,7 @@ export const controlDashboard = async (req, res) => {
         districtId: user.districtId,
         // Modaldan tanlangan kiritish uslubi (odatiy/batafsil/aqilli).
         entryMode: normalizeEntryMode(req.body?.entryMode),
+      enrichFromPinfl: normalizeBool(req.body?.enrichFromPinfl),
         // Sozlamada belgilanmagan ko'chalar bu rejimda ham chetlab
         // o'tiladi (avval faqat random rejimda shunday edi).
         randomExcludedStreetIds: (user.excludedStreetIds ?? []).map(String),
@@ -1338,6 +1348,7 @@ export const randomStart = async (req, res) => {
       areaId: user.areaId,
       districtId: user.districtId,
       entryMode: normalizeEntryMode(req.body?.entryMode),
+      enrichFromPinfl: normalizeBool(req.body?.enrichFromPinfl),
       randomMode: true,
       randomTarget: target,
       randomAdded: 0,
@@ -1599,6 +1610,56 @@ export const uncadastredStart = async (req, res) => {
 
     const mahalla = await resolveMahalla(user);
 
+    // Shu guruh uchun tugallanmagan jarayon bo'lsa — YANGI ochmaymiz,
+    // o'shani DAVOM ETTIRAMIZ. Shunda ro'yxat boshidan qayta ko'zdan
+    // kechirilmaydi: ishchi saqlangan kursordan davom etadi (avval
+    // ishlangan minglab odam umuman qayta o'qilmaydi — darhol o'tiladi)
+    // va hisoblagich noldan emas, to'xtagan sonidan ortadi.
+    //
+    // Faol jarayon yuqorida allaqachon tekshirildi; bu yerdagisi o'sha
+    // tekshiruvdan o'tgan (ya'ni to'xtagan/pauza/xato yoki egasi o'lgan)
+    // jarayon.
+    const resumable = await RegistrationRun.findOne({
+      userUid: user.uid,
+      uncadastredMode: true,
+      uncadastredGroupId: group._id,
+      status: {
+        $in: ["paused", "stopped", "error", "pending", "preparing", "running"],
+      },
+    })
+      .select("+token")
+      .sort({ createdAt: -1 });
+
+    if (resumable && !isRunActiveAnywhere(resumable)) {
+      resumable.status = "running";
+      resumable.control = "run";
+      resumable.error = null;
+      resumable.finishedAt = null;
+      resumable.token = token ?? resumable.token;
+      resumable.oblId = user.oblId;
+      resumable.areaId = user.areaId;
+      resumable.districtId = user.districtId;
+      resumable.membersTotal = count;
+      // Modaldan har safar qayta keladi — kelgan bo'lsa yangilaymiz.
+      if (req.body?.entryMode) {
+        resumable.entryMode = normalizeEntryMode(req.body.entryMode);
+      }
+      if (req.body?.enrichFromPinfl !== undefined) {
+        resumable.enrichFromPinfl = normalizeBool(req.body.enrichFromPinfl);
+      }
+      resumable.randomExcludedStreetIds = (user.excludedStreetIds ?? []).map(
+        String,
+      );
+      await resumable.save();
+
+      runRegistration(user, resumable, resumable.token);
+
+      const done = resumable.uncadastredProcessed ?? 0;
+      return res.status(202).json({
+        message: `"${group.name}" — davom ettirildi (${done}/${count})`,
+      });
+    }
+
     const run = await RegistrationRun.create({
       // Mahalla kaliti: guruhning o'zi MFY ni belgilaydi, lekin
       // panel va statistika mavjud mahalla bo'yicha guruhlanadi —
@@ -1613,6 +1674,7 @@ export const uncadastredStart = async (req, res) => {
       areaId: user.areaId,
       districtId: user.districtId,
       entryMode: normalizeEntryMode(req.body?.entryMode),
+      enrichFromPinfl: normalizeBool(req.body?.enrichFromPinfl),
       uncadastredMode: true,
       uncadastredGroupId: group._id,
       uncadastredGroupName: group.name,
