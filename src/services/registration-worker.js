@@ -47,6 +47,7 @@ import {
   sameMahalla,
 } from "../utils/mahalla.js";
 import { cadasterKey } from "../utils/cadaster.js";
+import { shuffled } from "../utils/shuffle.js";
 import { surnameKey, fullNameSurnameKey } from "../utils/surname.js";
 import { randomUzPhone, normalizePhone } from "../utils/phone.js";
 import {
@@ -2492,13 +2493,18 @@ const runRandomWorker = async (user, runDoc) => {
     const visitedHomeIds = new Set([String(homeId)]);
 
     const moveToNextHome = async () => {
-      const streets = await fetchStreets(user, run);
+      // Aralashtiramiz — controller'dagi boshlang'ich qidiruv bilan
+      // bir xil sabab: doimo bir xil tartibda yursak, har safar
+      // o'sha to'lgan xonadonlar qayta tekshiriladi.
+      const streets = shuffled(await fetchStreets(user, run));
 
       for (const street of streets) {
         // Taqiqlangan ko'chani butunlay o'tkazib yuboramiz.
         if (excludedStreetIds.has(String(street.id))) continue;
 
-        const homes = await fetchStreetHomes(user, String(street.id), run);
+        const homes = shuffled(
+          await fetchStreetHomes(user, String(street.id), run),
+        );
 
         for (const home of homes) {
           const nextHomeId = String(home.id);
@@ -4377,13 +4383,8 @@ const runUncadastredWorker = async (user, runDoc) => {
     }
 
     // Random taqsimlash uchun xonadonlarni BIR MARTA aralashtiramiz
-    // (`pickHomeFor` izohiga qarang). Fisher–Yates.
-    const shuffled = [...homeIndex.homes];
-    for (let i = shuffled.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    homeIndex.homes = shuffled;
+    // (`pickHomeFor` izohiga qarang).
+    homeIndex.homes = shuffled(homeIndex.homes);
 
     const randomCursor = { index: 0 };
 

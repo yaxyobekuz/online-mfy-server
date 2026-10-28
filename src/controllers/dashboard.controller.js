@@ -12,6 +12,7 @@ import User from "../models/User.js";
 import { getRequestUser, getRequestToken } from "../utils/request-context.js";
 import { extractMahallaName, mahallaKey } from "../utils/mahalla.js";
 import { cadasterKey } from "../utils/cadaster.js";
+import { shuffled } from "../utils/shuffle.js";
 import { getRateLimitState } from "../utils/rate-limit.js";
 import { REASON_LABELS } from "../utils/registration-codes.js";
 import {
@@ -1228,8 +1229,12 @@ export const randomStart = async (req, res) => {
       }).then((r) => r.data?.results ?? []);
 
       // Taqiqlangan ko'chalarni chetlab o'tamiz.
-      const streets = allStreets.filter(
-        (street) => !excludedStreetIds.has(String(street.id)),
+      //
+      // Aralashtiramiz: aks holda qidiruv har safar AYNAN bir xil
+      // ko'chadan boshlanib, `MAX_PROBES` chegarasini oldingi
+      // yurishlarda to'ldirilgan o'sha xonadonlarga sarflardi.
+      const streets = shuffled(
+        allStreets.filter((street) => !excludedStreetIds.has(String(street.id))),
       );
 
       if (!streets.length) {
@@ -1283,7 +1288,9 @@ export const randomStart = async (req, res) => {
           },
         });
 
-        const homes = homesResponse.data?.results ?? [];
+        // Ko'cha ichida ham aralashtiramiz: ro'yxat boshidagi
+        // xonadonlar eng ko'p to'lganlari.
+        const homes = shuffled(homesResponse.data?.results ?? []);
 
         for (const home of homes) {
           if (probes >= MAX_PROBES) break outer;
