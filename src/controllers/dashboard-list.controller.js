@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import * as XLSX from "xlsx";
 import Citizen from "../models/Citizen.js";
 import RegistrationHome from "../models/RegistrationHome.js";
 import RegistrationMember from "../models/RegistrationMember.js";
@@ -10,6 +11,7 @@ import {
   MEMBER_KEY_EXPR,
   memberScopeMatch,
   pickVisibleRun,
+  resolveMahalla,
   resolveScope,
 } from "./dashboard.controller.js";
 
@@ -265,6 +267,172 @@ export const getDashboardList = async (req, res) => {
       totalPages,
       items: filtered.slice(start, start + PAGE_SIZE),
     });
+  } catch {
+    return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+// Excel ustunidagi holat nomi — client'dagi registration-labels.js
+// bilan BIR XIL so'zlar, shunda jadvaldagi va fayldagi holat bir xil
+// o'qiladi.
+const MEMBER_STATUS_TITLES = {
+  pending: "Navbatda",
+  added: "Kiritildi",
+  exists: "Allaqachon bor",
+  skipped: "O'tkazildi",
+  failed: "Xatolik",
+  movedAway: "Boshqa MFY da",
+};
+
+const HOME_STATUS_TITLES = {
+  pending: "Navbatda",
+  processing: "Ishlanmoqda",
+  done: "Tugadi",
+  partial: "Qisman",
+  skipped: "O'tkazildi",
+  failed: "Kirmadi",
+};
+
+const statusTitle = (row) =>
+  row.kind === "home"
+    ? (HOME_STATUS_TITLES[row.status] ?? row.status ?? "")
+    : (MEMBER_STATUS_TITLES[row.status] ?? row.status ?? "");
+
+const TASHKENT_DATE_TIME = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Tashkent",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+// 17/10/2026, 22:16 -> 17.10.2026 22:16 (PDF hisobot bilan bir xil).
+const excelDateTime = (iso) =>
+  iso
+    ? TASHKENT_DATE_TIME.format(new Date(iso)).replace(/\//g, ".").replace(",", "")
+    : "";
+
+// Fayl nomidagi mahalla qismi: "Sarnavul MFY" -> "sarnavul-mfy".
+const slugify = (value) =>
+  String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+// Excel ustun kengligi — eng uzun qiymatga qarab, lekin cheklangan:
+// aks holda manzil ustuni ekranni egallab ketadi.
+const columnWidths = (rows, headers) =>
+  headers.map((header) => ({
+    wch: Math.min(
+      46,
+      Math.max(
+        header.length + 2,
+        ...rows.map((row) => String(row[header] ?? "").length + 2),
+      ),
+    ),
+  }));
+
+// Excel varaq nomi cheklovlari: 31 belgidan uzun bo'lmasin,
+// ": \ / ? * [ ]" belgilari va chetlarida apostrof bo'lmasin —
+// aks holda Excel faylni "buzuq" deb ochadi.
+const sheetName = (title) =>
+  String(title)
+    .replace(/[:\\/?*[\]]/g, " ")
+    .slice(0, 31)
+    .replace(/^'+|'+$/g, "")
+    .trim() || "Ro'yxat";
+
+/**
+ * GET /api/dashboard/list/export?kind=added&search=...
+ *
+ * Kartochka ro'yxatini Excel (.xlsx) qilib beradi. Qatorlar
+ * `buildRows` dan — ya'ni sahifadagi jadval va kartochkadagi son
+ * bilan AYNI manbadan; farqi shundaki bu yerda sahifalash yo'q,
+ * butun ro'yxat tushadi. Qidiruv berilgan bo'lsa, faqat topilganlar
+ * yuklanadi (ekranda ko'rinib turgani bilan mos bo'lsin).
+ */
+export const exportDashboardList = async (req, res) => {
+  const user = getRequestUser();
+  if (!user) return res.status(401).json({ message: "Access key noto'g'ri" });
+
+  const kind = String(req.query.kind ?? "");
+  if (!Object.hasOwn(LIST_KINDS, kind)) {
+    return res.status(400).json({ message: "Noto'g'ri ro'yxat turi" });
+  }
+
+  try {
+    const [mahalla, run] = await Promise.all([
+      resolveMahalla(user),
+      pickVisibleRun(user.uid),
+    ]);
+
+    const rows = run ? await buildRows(kind, run, user.uid) : [];
+
+    const query = String(req.query.search ?? "").trim().toLowerCase();
+    const filtered = query
+      ? rows.filter((row) => matchesSearch(row, query))
+      : rows;
+
+    // Ustunlar sahifadagi jadval tartibida; qo'shimcha ikkitasi —
+    // hujjat va vaqt: ro'yxatda joy yetmagani uchun ko'rsatilmaydi,
+    // Excel'da esa ish beradi.
+    const data = filtered.map((row, index) => ({
+      "№": index + 1,
+      "F.I.Sh.": row.fullName ?? "",
+      JSHSHIR: row.pinfl ?? "",
+      Kadastr: row.cadasterNumber ?? "",
+      Manzil: row.subtitle ?? "",
+      Holat: statusTitle(row),
+      Izoh: row.reasonLabel ?? "",
+      Hujjat: row.document ?? "",
+      Sana: excelDateTime(row.at),
+    }));
+
+    const headers = [
+      "№",
+      "F.I.Sh.",
+      "JSHSHIR",
+      "Kadastr",
+      "Manzil",
+      "Holat",
+      "Izoh",
+      "Hujjat",
+      "Sana",
+    ];
+
+    // Bo'sh ro'yxatda ham fayl ustunlari bilan chiqadi — "fayl
+    // buzuq" degan taassurot qolmasin.
+    const worksheet = XLSX.utils.json_to_sheet(data, { header: headers });
+    worksheet["!cols"] = columnWidths(data, headers);
+    worksheet["!autofilter"] = {
+      ref: XLSX.utils.encode_range({
+        s: { c: 0, r: 0 },
+        e: { c: headers.length - 1, r: Math.max(1, data.length) },
+      }),
+    };
+    // Sarlavha qatori har doim ko'rinib turadi.
+    worksheet["!freeze"] = { xSplit: "0", ySplit: "1" };
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName(LIST_KINDS[kind]));
+
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+    const day = new Date().toISOString().slice(0, 10);
+    const namePart = [slugify(LIST_KINDS[kind]) || kind, slugify(mahalla?.name)]
+      .filter(Boolean)
+      .join("-");
+    const fileName = `${namePart}-${day}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    return res.status(200).send(buffer);
   } catch {
     return res.status(500).json({ message: "Server xatoligi" });
   }
